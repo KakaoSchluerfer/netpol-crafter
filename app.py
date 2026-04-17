@@ -43,6 +43,17 @@ def main() -> None:
         st.error(str(exc))
         st.stop()
 
+    # ── Test mode: skip OIDC entirely ────────────────────────────────────────
+    if config.test_mode and not st.session_state.get("authenticated"):
+        st.session_state["authenticated"] = True
+        st.session_state["user"] = {
+            "name": "Test Engineer",
+            "email": "test.engineer@bank.internal",
+            "preferred_username": "test.engineer",
+            "sub": "test-user-fixture-001",
+        }
+        st.session_state["access_token"] = "test-token-not-real"
+
     authenticator = OIDCAuthenticator(config)
 
     # ── OAuth2 callback handling ──────────────────────────────────────────────

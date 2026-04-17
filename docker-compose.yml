@@ -1,0 +1,42 @@
+# NetPol Crafter – Docker Compose
+#
+# ── Quick start (test mode, no credentials needed) ───────────────────────────
+#   docker compose up --build
+#   open http://localhost:8501
+#
+# ── Production / real cluster ────────────────────────────────────────────────
+#   cp .env.example .env          # fill in real OIDC + GitHub + k8s values
+#   docker compose up --build
+#
+# How env layering works:
+#   1. .env.test   – committed safe defaults  (TEST_MODE=true, mock credentials)
+#   2. .env        – optional local overrides (gitignored; set TEST_MODE=false +
+#                    real secrets to switch to production mode)
+#   Variables in .env take precedence over .env.test.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: netpol-crafter:local
+    container_name: netpol-crafter
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env.test               # safe committed defaults
+      - path: .env              # local production overrides (optional)
+        required: false
+    volumes:
+      # Mount source for hot-reload during development.
+      # Remove this volume block for a clean production-like image test.
+      - type: bind
+        source: .
+        target: /app
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped

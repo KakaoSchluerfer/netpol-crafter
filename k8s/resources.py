@@ -13,13 +13,18 @@ Design notes:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import streamlit as st
 from kubernetes import client as k8s_client
 from kubernetes.client.exceptions import ApiException
 
+from k8s import fixtures as _fix
+
 logger = logging.getLogger(__name__)
+
+_TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 # Labels injected by controllers – they identify a *single replica*, not the workload.
 # Stripped when building podSelector so the selector matches the whole Deployment/SS.
@@ -50,6 +55,8 @@ def _safe_labels(labels: dict | None) -> dict[str, str]:
 @st.cache_data(ttl=60, show_spinner=False)
 def list_namespaces(_api_client: k8s_client.ApiClient) -> list[str]:
     """Return sorted list of namespace names visible to the ServiceAccount."""
+    if _TEST_MODE:
+        return _fix.get_namespaces()
     core = k8s_client.CoreV1Api(_api_client)
     ns_list = core.list_namespace(_request_timeout=10)
     return sorted(ns.metadata.name for ns in ns_list.items)
@@ -64,6 +71,8 @@ def get_namespace_labels(
     kubernetes.io/metadata.name is always present on K8s >= 1.21 and is the
     canonical way to select a specific namespace in namespaceSelector.
     """
+    if _TEST_MODE:
+        return _fix.get_namespace_labels(namespace)
     core = k8s_client.CoreV1Api(_api_client)
     ns = core.read_namespace(namespace, _request_timeout=10)
     labels = _safe_labels(ns.metadata.labels)
@@ -83,6 +92,8 @@ def list_pods_in_namespace(
     Each dict:  { name, namespace, labels, workload_labels }
     workload_labels has controller-injected keys stripped – safe for podSelector.
     """
+    if _TEST_MODE:
+        return _fix.get_pods(namespace)
     core = k8s_client.CoreV1Api(_api_client)
     pod_list = core.list_namespaced_pod(namespace, _request_timeout=10)
     result = []
@@ -110,6 +121,8 @@ def list_services_in_namespace(
     Return service metadata.  The `selector` field maps to pods and is useful
     for pre-populating the target pod selector from a chosen Service.
     """
+    if _TEST_MODE:
+        return _fix.get_services(namespace)
     core = k8s_client.CoreV1Api(_api_client)
     svc_list = core.list_namespaced_service(namespace, _request_timeout=10)
     result = []
@@ -147,6 +160,8 @@ def list_routes_in_namespace(
     Fetch OpenShift Route objects via CustomObjectsApi.
     Returns an empty list on vanilla Kubernetes (404 / no CRD) without raising.
     """
+    if _TEST_MODE:
+        return _fix.get_routes(namespace)
     custom = k8s_client.CustomObjectsApi(_api_client)
     try:
         response = custom.list_namespaced_custom_object(
@@ -191,7 +206,12 @@ def apply_network_policy(
     Returns { "action": "created"|"replaced", "name": "<name>", "namespace": "<ns>" }
 
     Raises ApiException on permission errors so the caller can surface them in the UI.
+    In TEST_MODE simulates a successful create without touching any cluster.
     """
+    namespace = policy_dict["metadata"]["namespace"]
+    name = policy_dict["metadata"]["name"]
+    if _TEST_MODE:
+        return {"action": "created (simulated)", "name": name, "namespace": namespace}
     networking = k8s_client.NetworkingV1Api(api_client)
     namespace = policy_dict["metadata"]["namespace"]
     name = policy_dict["metadata"]["name"]

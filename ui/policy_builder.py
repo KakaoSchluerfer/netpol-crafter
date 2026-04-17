@@ -280,6 +280,15 @@ def render_policy_builder(config: AppConfig) -> None:
         "Build an OpenShift **NetworkPolicy** from cluster resources. "
         "The tool fetches live labels so your selectors are always accurate."
     )
+
+    if config.test_mode:
+        st.warning(
+            "**TEST MODE** – No real cluster or GitHub connections. "
+            "Cluster data is loaded from built-in fixtures. "
+            "PR submission is replaced with a local dry-run preview.",
+            icon="🧪",
+        )
+
     st.divider()
 
     # ── Load namespace list (shared across sections) ───────────────────────────
@@ -482,6 +491,54 @@ def _render_pr_tab(
     yaml_str: str,
     user_info: dict,
 ) -> None:
+    # ── Dry-run mode: no GitHub calls, just show what would happen ────────────
+    if config.test_mode:
+        import datetime
+        ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        simulated_branch = f"netpol/{namespace}/{policy_name}-{ts}"
+        simulated_path   = f"{config.github_policies_path}/{namespace}/{policy_name}.yaml"
+
+        st.info(
+            "**TEST MODE – dry run.** No PR will be created. "
+            "The panels below show exactly what would be sent to GitHub.",
+            icon="🧪",
+        )
+
+        col_a, col_b = st.columns(2)
+        col_a.metric("Repository", config.github_repo)
+        col_b.metric("Base branch", config.github_base_branch)
+
+        with st.expander("📁 File that would be committed", expanded=True):
+            st.code(simulated_path, language=None)
+            st.code(yaml_str, language="yaml")
+
+        pr_title = st.text_input(
+            "PR title (preview only)",
+            value=f"feat(netpol): {policy_name} in {namespace}",
+        )
+        default_body = build_pr_body(
+            policy_name=policy_name,
+            namespace=namespace,
+            policy_dict=policy_dict,
+            yaml_str=yaml_str,
+            user_info=user_info,
+        )
+        with st.expander("📝 PR description that would be submitted", expanded=False):
+            st.text_area("PR body (read-only preview)", value=default_body, height=400,
+                         disabled=True, label_visibility="collapsed")
+
+        with st.expander("🌿 Git objects that would be created", expanded=False):
+            st.json({
+                "action": "dry-run (TEST_MODE=true)",
+                "repository": config.github_repo,
+                "new_branch": simulated_branch,
+                "base_branch": config.github_base_branch,
+                "committed_file": simulated_path,
+                "pr_title": pr_title,
+            })
+        return
+
+    # ── Production path ───────────────────────────────────────────────────────
     if not config.github_configured:
         st.warning(
             "GitHub integration is not configured. "
@@ -491,9 +548,6 @@ def _render_pr_tab(
         )
         return
 
-    from auth.oidc import OIDCAuthenticator
-
-    # ── PR metadata inputs ────────────────────────────────────────────────────
     st.markdown(
         f"**Target repository:** `{config.github_repo}` · "
         f"base branch: `{config.github_base_branch}` · "

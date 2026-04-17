@@ -39,6 +39,7 @@ class AppConfig:
     # ── App ───────────────────────────────────────────────────────────────────
     app_secret_key: str
     debug: bool
+    test_mode: bool
 
     @property
     def oidc_authority(self) -> str:
@@ -95,4 +96,5 @@ def get_config() -> AppConfig:
         github_policies_path=os.getenv("GITHUB_POLICIES_PATH", "policies"),
         app_secret_key=os.environ["APP_SECRET_KEY"],
         debug=os.getenv("DEBUG", "false").lower() == "true",
+        test_mode=os.getenv("TEST_MODE", "false").lower() == "true",
     )

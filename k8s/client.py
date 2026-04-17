@@ -5,14 +5,16 @@ Supports two modes controlled by K8S_IN_CLUSTER:
   • True  → load_incluster_config()  (Pod with mounted ServiceAccount token)
   • False → load_kube_config()       (developer workstation, respects KUBECONFIG)
 
-The returned ApiClient is lightweight; callers create typed API stubs from it
-(CoreV1Api, NetworkingV1Api, CustomObjectsApi) on demand.  Those stubs share the
-underlying urllib3 connection pool and are safe to use concurrently.
+In TEST_MODE the factory returns None.  Every function in resources.py checks
+for None first and returns fixture data instead of hitting the real API.
 """
-from kubernetes import client as k8s_client
-from kubernetes import config as k8s_config
+from __future__ import annotations
+
+from typing import Optional
 
 import streamlit as st
+from kubernetes import client as k8s_client
+from kubernetes import config as k8s_config
 
 from config import AppConfig
 
@@ -46,7 +48,10 @@ def get_api_client(
     return k8s_client.ApiClient(configuration=configuration)
 
 
-def build_api_client_from_config(config: AppConfig) -> k8s_client.ApiClient:
+def build_api_client_from_config(config: AppConfig) -> Optional[k8s_client.ApiClient]:
+    """Returns None in TEST_MODE so resource functions fall through to fixtures."""
+    if config.test_mode:
+        return None
     return get_api_client(
         in_cluster=config.k8s_in_cluster,
         api_server=config.k8s_api_server,
