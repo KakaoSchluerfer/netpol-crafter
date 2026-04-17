@@ -1,0 +1,14 @@
+# Core
+streamlit>=1.32.0
+python-dotenv>=1.0.0
+
+# Kubernetes
+kubernetes>=29.0.0
+
+# OIDC / Azure AD Entra ID
+authlib>=1.3.2
+requests>=2.31.0
+cryptography>=42.0.0
+
+# YAML
+PyYAML>=6.0.1

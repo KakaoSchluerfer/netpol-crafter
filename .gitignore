@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.kubeconfig
+*.pem
+*.crt
+*.key
