@@ -2,9 +2,10 @@
 Main policy builder UI.
 
 Session state keys owned by this module:
-  ingress_rules  – list of rule dicts
-  egress_rules   – list of rule dicts
-  confirm_apply  – bool, gating the two-step apply confirmation
+  ingress_rules   – list of rule dicts
+  egress_rules    – list of rule dicts
+  confirm_apply   – bool, gating the two-step direct-apply confirmation
+  submitted_prs   – list[dict], PRs opened in this session (for sidebar history)
 
 Each rule dict schema:
   {
@@ -32,6 +33,7 @@ from k8s import (
     get_namespace_labels,
     apply_network_policy,
 )
+from github.pr import GitHubPRClient, build_pr_body
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -51,6 +53,7 @@ def _init_state() -> None:
     st.session_state.setdefault("ingress_rules", [])
     st.session_state.setdefault("egress_rules", [])
     st.session_state.setdefault("confirm_apply", False)
+    st.session_state.setdefault("submitted_prs", [])
 
 
 def _add_rule(key: str) -> None:
@@ -252,11 +255,21 @@ def render_policy_builder(config: AppConfig) -> None:
                 del st.session_state[key]
             st.rerun()
 
+        # ── PR history for this session ───────────────────────────────────────
+        if st.session_state["submitted_prs"]:
+            st.divider()
+            st.markdown("**PRs submitted this session**")
+            for pr in st.session_state["submitted_prs"]:
+                st.markdown(
+                    f"- [{pr['policy']} → {pr['ns']}]({pr['url']})",
+                    unsafe_allow_html=False,
+                )
+
         st.divider()
         st.markdown(
             "<p style='font-size:0.75em;color:grey'>"
-            "Cluster data is cached for 60 s.<br>"
-            "YAML is generated locally – no data is transmitted until you click Apply."
+            "Cluster data cached 60 s.<br>"
+            "YAML generated locally – nothing transmitted until you submit a PR."
             "</p>",
             unsafe_allow_html=True,
         )
@@ -416,10 +429,10 @@ def render_policy_builder(config: AppConfig) -> None:
         st.rerun()
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # SECTION 5 – YAML Preview & Apply
+    # SECTION 5 – YAML Preview & Submit
     # ═══════════════════════════════════════════════════════════════════════════
     st.divider()
-    st.subheader("5 · YAML preview & apply")
+    st.subheader("5 · YAML preview & submit")
 
     ready = policy_name and target_namespace
     if not ready:
@@ -437,29 +450,123 @@ def render_policy_builder(config: AppConfig) -> None:
 
     st.code(yaml_str, language="yaml")
 
-    btn_col1, btn_col2 = st.columns([1, 4])
-    btn_col1.download_button(
+    dl_col, _, _ = st.columns([1, 1, 3])
+    dl_col.download_button(
         label="⬇ Download YAML",
         data=yaml_str,
         file_name=f"{policy_name}.yaml",
         mime="text/yaml",
     )
 
-    st.markdown("---")
-    st.markdown("#### Apply to cluster")
-    st.warning(
-        "⚠️ Applying a NetworkPolicy immediately affects live traffic. "
-        "Review the YAML carefully before proceeding.",
-        icon="⚠️",
+    st.divider()
+
+    tab_pr, tab_apply = st.tabs(["🔀 Open Pull Request  *(GitOps – recommended)*",
+                                  "⚡ Apply directly  *(break-glass only)*"])
+
+    # ── Tab 1: Pull Request ───────────────────────────────────────────────────
+    with tab_pr:
+        _render_pr_tab(config, policy_name, target_namespace, policy_dict, yaml_str, user_info)
+
+    # ── Tab 2: Direct apply (break-glass) ────────────────────────────────────
+    with tab_apply:
+        _render_apply_tab(config, api_client, policy_name, target_namespace, policy_dict)
+
+
+# ── Tab renderers ─────────────────────────────────────────────────────────────
+
+def _render_pr_tab(
+    config: AppConfig,
+    policy_name: str,
+    namespace: str,
+    policy_dict: dict,
+    yaml_str: str,
+    user_info: dict,
+) -> None:
+    if not config.github_configured:
+        st.warning(
+            "GitHub integration is not configured. "
+            "Set `GITHUB_REPO` and either `GITHUB_TOKEN` or the `GITHUB_APP_*` "
+            "variables in your `.env` file.",
+            icon="⚠️",
+        )
+        return
+
+    from auth.oidc import OIDCAuthenticator
+
+    # ── PR metadata inputs ────────────────────────────────────────────────────
+    st.markdown(
+        f"**Target repository:** `{config.github_repo}` · "
+        f"base branch: `{config.github_base_branch}` · "
+        f"path: `{config.github_policies_path}/{namespace}/{policy_name}.yaml`"
+    )
+    st.caption(
+        "A new branch `netpol/{namespace}/{policy-name}-{timestamp}` will be created "
+        "and a PR opened against the base branch. ArgoCD will deploy on merge."
+    )
+
+    default_title = f"feat(netpol): {policy_name} in {namespace}"
+    pr_title = st.text_input("PR title", value=default_title)
+
+    default_body = build_pr_body(
+        policy_name=policy_name,
+        namespace=namespace,
+        policy_dict=policy_dict,
+        yaml_str=yaml_str,
+        user_info=user_info,
+    )
+    pr_body = st.text_area("PR description", value=default_body, height=340)
+
+    st.divider()
+
+    if st.button("🔀 Create Pull Request", type="primary", use_container_width=False):
+        with st.spinner("Creating branch and opening PR…"):
+            try:
+                client = GitHubPRClient(config)
+                pr_url = client.create_policy_pr(
+                    policy_yaml=yaml_str,
+                    policy_name=policy_name,
+                    namespace=namespace,
+                    policy_dict=policy_dict,
+                    user_info=user_info,
+                    pr_title=pr_title,
+                    pr_body=pr_body,
+                )
+                st.session_state["submitted_prs"].append(
+                    {"policy": policy_name, "ns": namespace, "url": pr_url}
+                )
+                st.success(
+                    f"✅ Pull Request created: [{pr_title}]({pr_url})",
+                    icon="✅",
+                )
+                st.balloons()
+            except Exception as exc:
+                st.error(f"Failed to create PR: {exc}")
+                if config.debug:
+                    st.code(traceback.format_exc())
+
+
+def _render_apply_tab(
+    config: AppConfig,
+    api_client: Any,
+    policy_name: str,
+    namespace: str,
+    policy_dict: dict,
+) -> None:
+    st.error(
+        "**Break-glass use only.** Applying directly bypasses GitOps, "
+        "skips peer review, and creates drift between the cluster and the "
+        "policy repository. Use only during an active incident.",
+        icon="🚨",
     )
 
     if not st.session_state["confirm_apply"]:
-        if st.button("🚀 Apply to cluster", type="primary"):
+        if st.button("🚀 Apply directly to cluster", type="primary"):
             st.session_state["confirm_apply"] = True
             st.rerun()
     else:
-        st.error(
-            f"**Confirm:** Create/replace `{policy_name}` in namespace `{target_namespace}`?"
+        st.warning(
+            f"**Confirm:** Apply `{policy_name}` directly to namespace `{namespace}`? "
+            "This will not create a PR or git commit."
         )
         confirm_col1, confirm_col2 = st.columns(2)
 
@@ -469,8 +576,9 @@ def render_policy_builder(config: AppConfig) -> None:
                 try:
                     result = apply_network_policy(api_client, policy_dict)
                     st.success(
-                        f"✅ Policy **{result['name']}** {result['action']} "
-                        f"in namespace **{result['namespace']}**."
+                        f"Policy **{result['name']}** {result['action']} "
+                        f"in namespace **{result['namespace']}**. "
+                        "Remember to reconcile the policy repository."
                     )
                 except Exception as exc:
                     st.error(f"Apply failed: {exc}")

@@ -20,6 +20,13 @@ stringData:
   AZURE_TENANT_ID: "REPLACE_ME"
   APP_SECRET_KEY: "REPLACE_ME"
   OIDC_REDIRECT_URI: "https://netpol-crafter.apps.your-cluster.example.com"
+  # GitHub – use App auth in production
+  GITHUB_REPO: "your-org/network-policies"
+  GITHUB_BASE_BRANCH: "main"
+  GITHUB_POLICIES_PATH: "policies"
+  GITHUB_APP_ID: "REPLACE_ME"
+  GITHUB_APP_INSTALLATION_ID: "REPLACE_ME"
+  # Mount the PEM as a separate Secret volume and set GITHUB_APP_PRIVATE_KEY_PATH instead
 
 ---
 apiVersion: apps/v1

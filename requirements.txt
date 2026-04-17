@@ -12,3 +12,6 @@ cryptography>=42.0.0
 
 # YAML
 PyYAML>=6.0.1
+
+# GitHub API
+PyGithub>=2.3.0

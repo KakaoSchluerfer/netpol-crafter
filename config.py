@@ -24,6 +24,18 @@ class AppConfig:
     k8s_api_server: str
     k8s_ca_cert_path: str
 
+    # ── GitHub ────────────────────────────────────────────────────────────────
+    # Option A – GitHub App (recommended for production)
+    github_app_id: str            # numeric App ID as string
+    github_app_private_key: str   # PEM content (newlines preserved)
+    github_app_installation_id: str
+    # Option B – Personal Access Token (dev / small teams)
+    github_token: str
+    # Repo config
+    github_repo: str              # "org/repo-name"
+    github_base_branch: str       # target branch for PRs, default "main"
+    github_policies_path: str     # path prefix inside repo, default "policies"
+
     # ── App ───────────────────────────────────────────────────────────────────
     app_secret_key: str
     debug: bool
@@ -35,6 +47,25 @@ class AppConfig:
     @property
     def oidc_discovery_url(self) -> str:
         return f"{self.oidc_authority}/.well-known/openid-configuration"
+
+    @property
+    def github_configured(self) -> bool:
+        has_app = bool(self.github_app_id and self.github_app_private_key and self.github_app_installation_id)
+        return bool(self.github_repo) and (has_app or bool(self.github_token))
+
+
+def _read_github_private_key() -> str:
+    """
+    Read the GitHub App private key from a file path or inline env var.
+    Inline values may use literal '\\n' for newlines (common in CI secrets).
+    """
+    key_path = os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", "")
+    if key_path:
+        with open(key_path) as fh:
+            return fh.read()
+    raw = os.getenv("GITHUB_APP_PRIVATE_KEY", "")
+    # Replace escaped newlines written by some secret managers
+    return raw.replace("\\n", "\n")
 
 
 def get_config() -> AppConfig:
@@ -55,6 +86,13 @@ def get_config() -> AppConfig:
         k8s_in_cluster=os.getenv("K8S_IN_CLUSTER", "false").lower() == "true",
         k8s_api_server=os.getenv("K8S_API_SERVER", ""),
         k8s_ca_cert_path=os.getenv("K8S_CA_CERT_PATH", ""),
+        github_app_id=os.getenv("GITHUB_APP_ID", ""),
+        github_app_private_key=_read_github_private_key(),
+        github_app_installation_id=os.getenv("GITHUB_APP_INSTALLATION_ID", ""),
+        github_token=os.getenv("GITHUB_TOKEN", ""),
+        github_repo=os.getenv("GITHUB_REPO", ""),
+        github_base_branch=os.getenv("GITHUB_BASE_BRANCH", "main"),
+        github_policies_path=os.getenv("GITHUB_POLICIES_PATH", "policies"),
         app_secret_key=os.environ["APP_SECRET_KEY"],
         debug=os.getenv("DEBUG", "false").lower() == "true",
     )
