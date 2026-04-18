@@ -306,8 +306,16 @@ def get_namespace_labels(namespace: str) -> dict[str, str]:
     }))
 
 
+def get_all_namespace_labels() -> dict[str, dict[str, str]]:
+    return {ns: dict(labels) for ns, labels in NAMESPACE_LABELS.items()}
+
+
 def get_pods(namespace: str) -> list[dict[str, Any]]:
     return list(PODS.get(namespace, []))
+
+
+def get_all_pods() -> list[dict[str, Any]]:
+    return [pod for pods in PODS.values() for pod in pods]
 
 
 def get_services(namespace: str) -> list[dict[str, Any]]:

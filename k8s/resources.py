@@ -81,7 +81,44 @@ def get_namespace_labels(
     return labels
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def get_all_namespace_labels(
+    _api_client: k8s_client.ApiClient,
+) -> dict[str, dict[str, str]]:
+    """Return {namespace_name: {label_key: label_value}} for all visible namespaces."""
+    if _TEST_MODE:
+        return _fix.get_all_namespace_labels()
+    core = k8s_client.CoreV1Api(_api_client)
+    ns_list = core.list_namespace(_request_timeout=10)
+    result: dict[str, dict[str, str]] = {}
+    for ns in ns_list.items:
+        labels = _safe_labels(ns.metadata.labels)
+        labels.setdefault("kubernetes.io/metadata.name", ns.metadata.name)
+        result[ns.metadata.name] = labels
+    return result
+
+
 # ── Pods ──────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=60, show_spinner=False)
+def list_all_pods(_api_client: k8s_client.ApiClient) -> list[dict[str, Any]]:
+    """Return pod metadata for all running/pending pods across all namespaces."""
+    if _TEST_MODE:
+        return _fix.get_all_pods()
+    core = k8s_client.CoreV1Api(_api_client)
+    pod_list = core.list_pod_for_all_namespaces(_request_timeout=10)
+    result = []
+    for pod in pod_list.items:
+        labels = _safe_labels(pod.metadata.labels)
+        result.append({
+            "name": pod.metadata.name,
+            "namespace": pod.metadata.namespace,
+            "labels": labels,
+            "workload_labels": extract_workload_labels(labels),
+            "phase": (pod.status.phase or "Unknown") if pod.status else "Unknown",
+        })
+    return result
+
 
 @st.cache_data(ttl=60, show_spinner=False)
 def list_pods_in_namespace(
