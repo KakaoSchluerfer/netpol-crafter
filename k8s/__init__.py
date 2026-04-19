@@ -8,6 +8,7 @@ from .resources import (
     get_namespace_labels,
     get_all_namespace_labels,
     apply_network_policy,
+    list_network_policies,
     EXCLUDED_LABEL_KEYS,
     extract_workload_labels,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "get_namespace_labels",
     "get_all_namespace_labels",
     "apply_network_policy",
+    "list_network_policies",
     "EXCLUDED_LABEL_KEYS",
     "extract_workload_labels",
 ]

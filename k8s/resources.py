@@ -233,6 +233,25 @@ def list_routes_in_namespace(
     return result
 
 
+# ── Network Policy List ───────────────────────────────────────────────────────
+
+@st.cache_data(ttl=60, show_spinner=False)
+def list_network_policies(_api_client: k8s_client.ApiClient) -> list[dict[str, Any]]:
+    """Return all NetworkPolicy objects across all namespaces as plain dicts."""
+    if _TEST_MODE or _api_client is None:
+        return _fix.get_network_policies()
+    networking = k8s_client.NetworkingV1Api(_api_client)
+    raw = networking.list_network_policy_for_all_namespaces(_request_timeout=10)
+    # Convert K8s model objects to plain dicts via the API client serializer
+    from kubernetes.client import ApiClient
+    temp_client = ApiClient()
+    result = []
+    for pol in raw.items:
+        d = temp_client.sanitize_for_serialization(pol)
+        result.append(d)
+    return result
+
+
 # ── Network Policy Apply ──────────────────────────────────────────────────────
 
 def apply_network_policy(

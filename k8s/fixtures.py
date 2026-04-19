@@ -324,3 +324,164 @@ def get_services(namespace: str) -> list[dict[str, Any]]:
 
 def get_routes(namespace: str) -> list[dict[str, Any]]:
     return list(ROUTES.get(namespace, []))
+
+
+# ── Network Policies ──────────────────────────────────────────────────────────
+
+NETWORK_POLICIES: list[dict[str, Any]] = [
+    # API Gateway → Payment API (ingress on 8080)
+    {
+        "metadata": {"name": "allow-gateway-to-payment-api", "namespace": "payments"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "payment-api"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "api-gateway"}},
+                    "podSelector": {"matchLabels": {"app": "gateway"}},
+                }],
+                "ports": [{"protocol": "TCP", "port": 8080}],
+            }],
+        },
+    },
+    # Payment Processor → Payment DB (egress on 5432, within payments namespace)
+    {
+        "metadata": {"name": "allow-processor-to-db", "namespace": "payments"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "payment-processor"}},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{"podSelector": {"matchLabels": {"app": "payment-db"}}}],
+                "ports": [{"protocol": "TCP", "port": 5432}],
+            }],
+        },
+    },
+    # Payment API → Payment DB (egress on 5432)
+    {
+        "metadata": {"name": "allow-payment-api-to-db", "namespace": "payments"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "payment-api"}},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{"podSelector": {"matchLabels": {"app": "payment-db"}}}],
+                "ports": [{"protocol": "TCP", "port": 5432}],
+            }],
+        },
+    },
+    # Payment Processor → Fraud Scorer (egress on gRPC 50051, cross-namespace)
+    {
+        "metadata": {"name": "allow-payment-to-fraud-scorer", "namespace": "payments"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "payment-processor"}},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "fraud-detection"}},
+                    "podSelector": {"matchLabels": {"app": "fraud-scorer"}},
+                }],
+                "ports": [{"protocol": "TCP", "port": 50051}],
+            }],
+        },
+    },
+    # Fraud Detection: allow ingress from payments workers (mirror of above egress)
+    {
+        "metadata": {"name": "allow-ingress-from-payments", "namespace": "fraud-detection"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "fraud-scorer"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "payments"}},
+                    "podSelector": {"matchLabels": {"tier": "worker"}},
+                }],
+                "ports": [{"protocol": "TCP", "port": 50051}],
+            }],
+        },
+    },
+    # Fraud Scorer → Feature Store (Redis, within fraud-detection)
+    {
+        "metadata": {"name": "allow-scorer-to-feature-store", "namespace": "fraud-detection"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "fraud-scorer"}},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{"podSelector": {"matchLabels": {"app": "feature-store"}}}],
+                "ports": [{"protocol": "TCP", "port": 6379}],
+            }],
+        },
+    },
+    # API Gateway → Account API
+    {
+        "metadata": {"name": "allow-gateway-to-account-api", "namespace": "account-services"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "account-api"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "api-gateway"}},
+                    "podSelector": {"matchLabels": {"app": "gateway"}},
+                }],
+                "ports": [{"protocol": "TCP", "port": 8080}],
+            }],
+        },
+    },
+    # Account API → Account DB
+    {
+        "metadata": {"name": "allow-account-api-to-db", "namespace": "account-services"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "account-api"}},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{"podSelector": {"matchLabels": {"app": "account-db"}}}],
+                "ports": [{"protocol": "TCP", "port": 5432}],
+            }],
+        },
+    },
+    # Prometheus scrapes all pods in payments, fraud-detection, account-services
+    {
+        "metadata": {"name": "allow-prometheus-scrape", "namespace": "monitoring"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "prometheus"}},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{
+                    "namespaceSelector": {
+                        "matchExpressions": [{"key": "environment", "operator": "In", "values": ["production"]}]
+                    },
+                }],
+                "ports": [{"protocol": "TCP", "port": 8080}, {"protocol": "TCP", "port": 9090}],
+            }],
+        },
+    },
+    # Payment API → Vault (secrets fetch)
+    {
+        "metadata": {"name": "allow-payment-api-to-vault", "namespace": "payments"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "payment-api"}},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{
+                    "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "infra"}},
+                    "podSelector": {"matchLabels": {"app": "vault"}},
+                }],
+                "ports": [{"protocol": "TCP", "port": 8200}],
+            }],
+        },
+    },
+    # Payment API → external SWIFT gateway (egress to external CIDR)
+    {
+        "metadata": {"name": "allow-swift-egress", "namespace": "payments"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "payment-api"}},
+            "policyTypes": ["Egress"],
+            "egress": [{
+                "to": [{"ipBlock": {"cidr": "10.200.48.0/22"}}],
+                "ports": [{"protocol": "TCP", "port": 9443}],
+            }],
+        },
+    },
+]
+
+
+def get_network_policies() -> list[dict[str, Any]]:
+    return [dict(p) for p in NETWORK_POLICIES]
