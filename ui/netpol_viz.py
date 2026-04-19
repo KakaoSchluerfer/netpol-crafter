@@ -172,10 +172,12 @@ def collect_edges(
                         for tgt in targets:
                             add(eid, tgt, ports_lbl, pol_name)
                 else:
+                    # podSelector-only peer → same namespace as policy (K8s semantics)
+                    ns_sel = peer.get("namespaceSelector")
                     sources = find_peers(
                         workloads, ns_labels, visible_ns,
-                        restrict_ns=None,
-                        ns_selector=peer.get("namespaceSelector"),
+                        restrict_ns=None if ns_sel is not None else pol_ns,
+                        ns_selector=ns_sel,
                         pod_selector=peer.get("podSelector"),
                     )
                     for src in sources:
@@ -202,10 +204,12 @@ def collect_edges(
                         for src in targets:
                             add(src, eid, ports_lbl, pol_name)
                 else:
+                    # podSelector-only peer → same namespace as policy (K8s semantics)
+                    ns_sel = peer.get("namespaceSelector")
                     dests = find_peers(
                         workloads, ns_labels, visible_ns,
-                        restrict_ns=None,
-                        ns_selector=peer.get("namespaceSelector"),
+                        restrict_ns=None if ns_sel is not None else pol_ns,
+                        ns_selector=ns_sel,
                         pod_selector=peer.get("podSelector"),
                     )
                     for dst in dests:
@@ -336,20 +340,34 @@ def policy_preview_dot(
         [policy_dict], workloads, ns_labels, visible_ns, show_external
     )
 
-    # Only keep namespaces that appear in at least one edge
-    relevant_ns: set[str] = set()
+    # Collect relevant namespaces:
+    #   1. The policy's own namespace (always shown)
+    #   2. Any namespace that matches a namespaceSelector in the rules
+    #      (shown even when no pods there match the podSelector — makes
+    #       the policy intent visible even when there are no live connections)
+    #   3. Any namespace that appears in an edge (sources / destinations)
+    pol_ns = policy_dict.get("metadata", {}).get("namespace", "")
+    relevant_ns: set[str] = {pol_ns} if pol_ns else set()
+
+    spec = policy_dict.get("spec", {})
+    for direction, peer_key in (("ingress", "from"), ("egress", "to")):
+        for rule in spec.get(direction, []):
+            for peer in rule.get(peer_key, []):
+                ns_sel = peer.get("namespaceSelector")
+                if ns_sel is not None:
+                    for ns in visible_ns:
+                        ns_lbls = ns_labels.get(ns, {"kubernetes.io/metadata.name": ns})
+                        if selector_matches(ns_lbls, ns_sel):
+                            relevant_ns.add(ns)
+                elif peer.get("podSelector") is not None and not peer.get("ipBlock"):
+                    # podSelector-only → targets the policy's own namespace
+                    relevant_ns.add(pol_ns)
+
     for src, dst in edges:
         if src in workloads:
             relevant_ns.add(workloads[src]["namespace"])
         if dst in workloads:
             relevant_ns.add(workloads[dst]["namespace"])
-    for cidr in external_nodes:
-        pass  # external nodes handled separately
-
-    # Always include the policy's own namespace
-    pol_ns = policy_dict.get("metadata", {}).get("namespace", "")
-    if pol_ns:
-        relevant_ns.add(pol_ns)
 
     # Filter workloads to only those in relevant namespaces
     filtered_workloads = {
