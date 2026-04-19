@@ -42,7 +42,7 @@ import streamlit as st
 import yaml
 
 from config import AppConfig
-from k8s.client import build_api_client_from_config
+from k8s.client import get_cluster_client
 from k8s import (
     list_namespaces,
     list_pods_in_namespace,
@@ -55,6 +55,7 @@ from k8s import (
 )
 from gh.pr import GitHubPRClient, build_pr_body
 from ui.netpol_viz import policy_preview_dot
+from ui.cluster_selector import render_cluster_selector
 
 # ── Label index helpers ───────────────────────────────────────────────────────
 
@@ -790,7 +791,6 @@ def render_policy_builder(config: AppConfig) -> None:
     _init_state()
 
     user_info = st.session_state.get("user", {})
-    api_client = build_api_client_from_config(config)
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -798,6 +798,12 @@ def render_policy_builder(config: AppConfig) -> None:
         from auth.oidc import OIDCAuthenticator
         st.markdown(f"**{OIDCAuthenticator.display_name(user_info)}**")
         st.caption(user_info.get("email", ""))
+        st.divider()
+
+        st.markdown("### 🖥 Cluster")
+        _cluster, api_client = render_cluster_selector(
+            config.clusters, session_key="builder_cluster"
+        )
         st.divider()
 
         if st.button("🔄 Refresh cluster data", use_container_width=True):
@@ -1082,7 +1088,7 @@ def render_policy_builder(config: AppConfig) -> None:
         _render_pr_tab(config, policy_name, target_namespace, policy_dict, yaml_str, user_info)
 
     with tab_apply:
-        _render_apply_tab(config, api_client, policy_name, target_namespace, policy_dict)
+        _render_apply_tab(config, config.clusters, policy_name, target_namespace, policy_dict)
 
 
 # ── Tab renderers ─────────────────────────────────────────────────────────────
@@ -1203,7 +1209,7 @@ def _render_pr_tab(
 
 def _render_apply_tab(
     config: AppConfig,
-    api_client: Any,
+    clusters: tuple | list,
     policy_name: str,
     namespace: str,
     policy_dict: dict,
@@ -1215,14 +1221,34 @@ def _render_apply_tab(
         icon="🚨",
     )
 
+    # Cluster selector: may differ from the read cluster (e.g. apply to prod, view staging)
+    clusters = list(clusters)
+    if len(clusters) > 1:
+        display_names = [c.get("display_name") or c["name"] for c in clusters]
+        by_display = {(c.get("display_name") or c["name"]): c for c in clusters}
+        chosen_display = st.selectbox(
+            "Apply to cluster",
+            options=display_names,
+            key="apply_target_cluster",
+            help="The cluster this policy will be written to.",
+        )
+        apply_cluster = by_display[chosen_display]
+    else:
+        apply_cluster = clusters[0] if clusters else None
+        if apply_cluster:
+            st.caption(f"Target cluster: **{apply_cluster.get('display_name') or apply_cluster['name']}**")
+
+    apply_client = get_cluster_client(apply_cluster) if apply_cluster else None
+
     if not st.session_state["confirm_apply"]:
         if st.button("🚀 Apply directly to cluster", type="primary"):
             st.session_state["confirm_apply"] = True
             st.rerun()
     else:
+        cluster_label = apply_cluster.get("display_name") or apply_cluster["name"] if apply_cluster else "?"
         st.warning(
-            f"**Confirm:** Apply `{policy_name}` directly to namespace `{namespace}`? "
-            "This will not create a PR or git commit."
+            f"**Confirm:** Apply `{policy_name}` directly to namespace `{namespace}` "
+            f"on **{cluster_label}**? This will not create a PR or git commit."
         )
         confirm_col1, confirm_col2 = st.columns(2)
 
@@ -1230,10 +1256,11 @@ def _render_apply_tab(
             st.session_state["confirm_apply"] = False
             with st.spinner("Applying NetworkPolicy…"):
                 try:
-                    result = apply_network_policy(api_client, policy_dict)
+                    result = apply_network_policy(apply_client, policy_dict)
                     st.success(
                         f"Policy **{result['name']}** {result['action']} "
-                        f"in namespace **{result['namespace']}**. "
+                        f"in namespace **{result['namespace']}** "
+                        f"on **{cluster_label}**. "
                         "Remember to reconcile the policy repository."
                     )
                 except Exception as exc:

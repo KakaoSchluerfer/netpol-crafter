@@ -1,4 +1,4 @@
-from .client import get_api_client
+from .client import get_api_client, get_cluster_client
 from .resources import (
     list_namespaces,
     list_pods_in_namespace,
@@ -15,6 +15,7 @@ from .resources import (
 
 __all__ = [
     "get_api_client",
+    "get_cluster_client",
     "list_namespaces",
     "list_pods_in_namespace",
     "list_all_pods",

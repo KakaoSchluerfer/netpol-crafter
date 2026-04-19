@@ -10,18 +10,11 @@ import yaml
 import streamlit as st
 
 from config import get_config
-from k8s.client import build_api_client_from_config
 from k8s import list_network_policies, list_all_pods, get_all_namespace_labels, list_namespaces
 from ui.netpol_viz import ns_palette, build_workloads, cluster_map_dot
+from ui.cluster_selector import render_cluster_selector
 
 st.set_page_config(page_title="Network Policy Map", layout="wide")
-
-
-def _api_client():
-    try:
-        return build_api_client_from_config(get_config())
-    except Exception:
-        return None
 
 
 def main() -> None:
@@ -31,7 +24,17 @@ def main() -> None:
         "NetworkPolicies. Workloads are resolved to their labels."
     )
 
-    client = _api_client()
+    try:
+        config = get_config()
+    except EnvironmentError as exc:
+        st.error(str(exc))
+        st.stop()
+
+    # ── Cluster selector (sidebar) ────────────────────────────────────────────
+    st.sidebar.header("Cluster")
+    cluster, client = render_cluster_selector(config.clusters, session_key="map_cluster")
+    if cluster is None:
+        st.stop()
 
     with st.spinner("Loading cluster data…"):
         all_namespaces = list_namespaces(client)
