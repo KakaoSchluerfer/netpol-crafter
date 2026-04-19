@@ -54,6 +54,7 @@ from k8s import (
     apply_network_policy,
 )
 from gh.pr import GitHubPRClient, build_pr_body
+from ui.netpol_viz import policy_preview_dot
 
 # ── Label index helpers ───────────────────────────────────────────────────────
 
@@ -865,7 +866,9 @@ def render_policy_builder(config: AppConfig) -> None:
                 [p["workload_labels"] for p in all_pods_global]
             )
         except Exception:
+            all_ns_labels_map = {}
             all_ns_label_index = {}
+            all_pods_global = []
             all_pod_label_index = {}
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -1050,6 +1053,17 @@ def render_policy_builder(config: AppConfig) -> None:
     st.code(yaml_str, language="yaml")
     st.markdown("### Policy explainer")
     st.markdown(explain_policy_preview(policy_dict))
+
+    st.markdown("### Connection diagram")
+    _viz_dot, _viz_flows = policy_preview_dot(policy_dict, all_pods_global, all_ns_labels_map)
+    if _viz_flows == 0:
+        st.info(
+            "No matching workloads found for the selectors in this policy. "
+            "The diagram will populate once the namespace and pod selectors "
+            "match pods in the cluster.",
+            icon="ℹ️",
+        )
+    st.graphviz_chart(_viz_dot, use_container_width=True)
 
     dl_col, _, _ = st.columns([1, 1, 3])
     dl_col.download_button(
