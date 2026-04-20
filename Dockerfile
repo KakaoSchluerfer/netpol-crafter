@@ -11,24 +11,16 @@ WORKDIR /app
 COPY --chown=1000:1000 requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Source — owned by appuser at copy time, no chown -R needed
+# Application source
 COPY --chown=1000:1000 app.py config.py ./
 COPY --chown=1000:1000 .streamlit/ .streamlit/
 COPY --chown=1000:1000 auth/ auth/
 COPY --chown=1000:1000 k8s/ k8s/
 COPY --chown=1000:1000 pages/ pages/
 COPY --chown=1000:1000 ui/ ui/
+COPY --chown=1000:1000 exporter/ exporter/
 
 USER 1000
 
-EXPOSE 8501
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD curl -sf http://localhost:8501/_stcore/health || exit 1
-
-ENTRYPOINT ["streamlit", "run", "app.py", \
-    "--server.port=8501", \
-    "--server.address=0.0.0.0", \
-    "--server.headless=true", \
-    "--server.enableCORS=false", \
-    "--server.enableXsrfProtection=true"]
+# No default CMD — the Kubernetes Deployment (or docker-compose service) sets
+# the command to either the Streamlit app or the uvicorn exporter.

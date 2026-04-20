@@ -1,18 +1,16 @@
-# Core
+# Streamlit UI
 streamlit>=1.32.0
-python-dotenv>=1.0.0
 
-# Kubernetes
+# Exporter API
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# Kubernetes / OpenShift
 kubernetes>=29.0.0
-
-# OpenShift OAuth
 requests>=2.31.0
 
-# YAML
-PyYAML>=6.0.1
-
-# Pydantic (for exporter models used by the client)
+# Shared
 pydantic>=2.0.0
-
-# HTTP client
+PyYAML>=6.0.1
 httpx>=0.26.0
+python-dotenv>=1.0.0

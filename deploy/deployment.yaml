@@ -7,23 +7,35 @@ metadata:
     kubernetes.io/metadata.name: netpol-crafter
 
 ---
-# ── App Secret ────────────────────────────────────────────────────────────────
-# Fill in all REPLACE_ME values before applying.
+# ── Non-sensitive configuration ───────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: netpol-crafter-config
+  namespace: netpol-crafter
+data:
+  OCP_CLIENT_ID: "netpol-crafter"
+  OCP_API_SERVER: "https://api.your-cluster.example.com:6443"
+  OCP_REDIRECT_URI: "https://netpol-crafter.apps.your-cluster.example.com"
+  CLUSTER_NAME: "Production"
+  EXPORTER_URL: "http://netpol-exporter:8080"
+  K8S_IN_CLUSTER: "true"
+  TEST_MODE: "false"
+  # Optional: path to a PEM CA bundle mounted as a volume
+  # OCP_CA_CERT_PATH: "/etc/netpol-certs/cluster-ca.crt"
+
+---
+# ── Sensitive credentials ─────────────────────────────────────────────────────
+# Fill in REPLACE_ME values before applying.
 # Use Sealed Secrets, Vault, or an OCP ExternalSecret for production.
 apiVersion: v1
 kind: Secret
 metadata:
-  name: netpol-crafter-env
+  name: netpol-crafter-secrets
   namespace: netpol-crafter
 type: Opaque
 stringData:
-  OCP_CLIENT_ID: "netpol-crafter"
   OCP_CLIENT_SECRET: "REPLACE_ME"
-  OCP_API_SERVER: "https://api.your-cluster.example.com:6443"
-  OCP_REDIRECT_URI: "https://netpol-crafter.apps.your-cluster.example.com"
-  # Optional: path to a PEM CA bundle mounted as a volume
-  # OCP_CA_CERT_PATH: "/etc/netpol-certs/cluster-ca.crt"
-  CLUSTER_NAME: "Production"
   APP_SECRET_KEY: "REPLACE_ME"  # python3 -c "import secrets; print(secrets.token_urlsafe(64))"
 
 ---
@@ -45,7 +57,6 @@ spec:
       labels:
         app.kubernetes.io/name: netpol-crafter
     spec:
-      # No ServiceAccount needed — user OAuth token is used for K8s API calls
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -54,9 +65,6 @@ spec:
       containers:
         - name: app
           image: your-registry.example.com/netpol-crafter:latest
-          ports:
-            - containerPort: 8501
-              name: http
           command:
             - streamlit
             - run
@@ -66,14 +74,14 @@ spec:
             - "--server.headless=true"
             - "--server.enableCORS=false"
             - "--server.enableXsrfProtection=true"
+          ports:
+            - containerPort: 8501
+              name: http
           envFrom:
+            - configMapRef:
+                name: netpol-crafter-config
             - secretRef:
-                name: netpol-crafter-env
-          env:
-            - name: EXPORTER_URL
-              value: "http://netpol-exporter:8080"
-            - name: TEST_MODE
-              value: "false"
+                name: netpol-crafter-secrets
           resources:
             requests:
               cpu: 100m
@@ -157,20 +165,18 @@ spec:
         fsGroup: 1000
       containers:
         - name: exporter
-          image: your-registry.example.com/netpol-exporter:latest
+          image: your-registry.example.com/netpol-crafter:latest
+          command:
+            - uvicorn
+            - exporter.main:app
+            - "--host=0.0.0.0"
+            - "--port=8080"
           ports:
             - containerPort: 8080
               name: http
-          env:
-            - name: K8S_IN_CLUSTER
-              value: "true"
-            - name: CLUSTER_NAME
-              valueFrom:
-                secretKeyRef:
-                  name: netpol-crafter-env
-                  key: CLUSTER_NAME
-            - name: TEST_MODE
-              value: "false"
+          envFrom:
+            - configMapRef:
+                name: netpol-crafter-config
           resources:
             requests:
               cpu: 50m
