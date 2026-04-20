@@ -1,13 +1,5 @@
 """
-Kubernetes / OpenShift API client factory – multi-cluster edition.
-
-Each cluster is described by a dict (from config.clusters):
-  name         – unique cache key
-  display_name – shown in UI
-  api_server   – https://api.cluster.example.com:6443
-  token        – ServiceAccount bearer token
-  ca_cert_path – path to a mounted PEM CA bundle (empty → system CAs)
-  in_cluster   – True to use the pod's own mounted SA token (local cluster only)
+Kubernetes / OpenShift API client factory.
 
 In TEST_MODE every function returns None; resources.py falls through to fixtures.
 """
@@ -60,6 +52,19 @@ def get_cluster_client(cluster: dict[str, Any]) -> Optional[k8s_client.ApiClient
     )
 
 
+def build_user_token_client(access_token: str, config: Any) -> Optional[k8s_client.ApiClient]:
+    """Build an ApiClient authenticated with the user's OCP OAuth access token."""
+    if os.getenv("TEST_MODE", "false").lower() == "true":
+        return None
+    return _cached_cluster_client(
+        name=f"__user_{access_token[:16]}",  # cache key, prefix only for privacy
+        api_server=config.ocp_api_server,
+        token=access_token,
+        ca_cert_path=config.ocp_ca_cert_path,
+        in_cluster=False,
+    )
+
+
 # ── Backward-compat helpers ───────────────────────────────────────────────────
 
 def get_api_client(
@@ -79,12 +84,7 @@ def get_api_client(
 
 def build_api_client_from_config(config: Any) -> Optional[k8s_client.ApiClient]:
     """
-    Build a client from AppConfig.  Returns the first cluster's client.
-    Use get_cluster_client(cluster_dict) for multi-cluster scenarios.
+    Backward-compat stub. The crafter now uses the exporter REST API;
+    this function is kept to avoid import errors in older callers.
     """
-    if config.test_mode:
-        return None
-    clusters = list(config.clusters)
-    if not clusters:
-        return None
-    return get_cluster_client(clusters[0])
+    return None

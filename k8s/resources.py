@@ -252,6 +252,108 @@ def list_network_policies(_api_client: k8s_client.ApiClient) -> list[dict[str, A
     return result
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def list_admin_network_policies(_api_client) -> list[dict[str, Any]]:
+    """Return AdminNetworkPolicy objects (cluster-scoped). Empty list if unavailable."""
+    if _TEST_MODE or _api_client is None:
+        return []  # fixtures don't include ANPs currently
+    custom = k8s_client.CustomObjectsApi(_api_client)
+    try:
+        result = custom.list_cluster_custom_object(
+            group="policy.networking.k8s.io", version="v1alpha1",
+            plural="adminnetworkpolicies", _request_timeout=10,
+        )
+        return sorted(result.get("items", []), key=lambda x: x.get("spec", {}).get("priority", 0))
+    except ApiException as exc:
+        if exc.status in (404, 403):
+            return []
+        raise
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def list_baseline_admin_network_policy(_api_client) -> dict[str, Any] | None:
+    """Return the single BaselineAdminNetworkPolicy spec, or None."""
+    if _TEST_MODE or _api_client is None:
+        return None
+    custom = k8s_client.CustomObjectsApi(_api_client)
+    try:
+        result = custom.list_cluster_custom_object(
+            group="policy.networking.k8s.io", version="v1alpha1",
+            plural="baselineadminnetworkpolicies", _request_timeout=10,
+        )
+        items = result.get("items", [])
+        return items[0] if items else None
+    except ApiException as exc:
+        if exc.status in (404, 403):
+            return None
+        raise
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def list_all_routes(_api_client) -> list[dict[str, Any]]:
+    """Return all routes across all namespaces."""
+    if _TEST_MODE or _api_client is None:
+        routes = []
+        for ns in _fix.get_namespaces():
+            routes.extend(_fix.get_routes(ns))
+        return routes
+    custom = k8s_client.CustomObjectsApi(_api_client)
+    try:
+        response = custom.list_cluster_custom_object(
+            group="route.openshift.io", version="v1", plural="routes",
+            _request_timeout=10,
+        )
+    except ApiException as exc:
+        if exc.status in (404, 403):
+            return []
+        raise
+    result = []
+    for route in response.get("items", []):
+        meta = route.get("metadata", {})
+        spec = route.get("spec", {})
+        result.append({
+            "name": meta.get("name", ""),
+            "namespace": meta.get("namespace", ""),
+            "host": spec.get("host", ""),
+            "path": spec.get("path", "/"),
+            "to": spec.get("to", {}),
+            "labels": meta.get("labels", {}),
+            "tls": bool(spec.get("tls")),
+        })
+    return result
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def list_all_services(_api_client) -> list[dict[str, Any]]:
+    """Return all services across all namespaces."""
+    if _TEST_MODE or _api_client is None:
+        svcs = []
+        for ns in _fix.get_namespaces():
+            svcs.extend(_fix.get_services(ns))
+        return svcs
+    core = k8s_client.CoreV1Api(_api_client)
+    svc_list = core.list_service_for_all_namespaces(_request_timeout=10)
+    result = []
+    for svc in svc_list.items:
+        ports = []
+        for p in svc.spec.ports or []:
+            ports.append({
+                "port": p.port,
+                "protocol": p.protocol or "TCP",
+                "target_port": str(p.target_port) if p.target_port else "",
+                "name": p.name or "",
+            })
+        result.append({
+            "name": svc.metadata.name,
+            "namespace": svc.metadata.namespace,
+            "labels": _safe_labels(svc.metadata.labels),
+            "selector": _safe_labels(svc.spec.selector),
+            "ports": ports,
+            "type": svc.spec.type or "ClusterIP",
+        })
+    return result
+
+
 # ── Network Policy Apply ──────────────────────────────────────────────────────
 
 def apply_network_policy(

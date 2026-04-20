@@ -1,11 +1,11 @@
 """
 Login page rendered when no authenticated session exists.
 
-OIDC redirect flow:
-  1. User clicks "Sign in with Microsoft"
+OAuth redirect flow:
+  1. User clicks "Sign in with OpenShift"
   2. We store the nonce state in st.session_state["oauth_state"]
-  3. A JavaScript redirect sends the browser to Azure AD
-  4. Azure AD calls back with ?code=&state= → handled in app.py before this page renders
+  3. A JavaScript redirect sends the browser to OpenShift OAuth
+  4. OpenShift calls back with ?code=&state= → handled in app.py before this page renders
 """
 import streamlit as st
 import streamlit.components.v1 as components
@@ -26,21 +26,21 @@ def render_login_page(authenticator: OIDCAuthenticator) -> None:
         st.markdown("## 🔐 NetPol Crafter")
         st.markdown(
             "**OpenShift Network Policy builder** – authenticate with your "
-            "corporate Microsoft account to continue."
+            "OpenShift account to continue."
         )
         st.divider()
 
         if st.button(
-            "Sign in with Microsoft",
-            use_container_width=True,
+            "Sign in with OpenShift",
+            width="stretch",
             type="primary",
-            help="Redirects to your Azure AD / Entra ID tenant for authentication",
+            help="Redirects to OpenShift OAuth for authentication",
         ):
             _trigger_oidc_redirect(authenticator)
 
         st.markdown(
             "<p style='text-align:center; color:grey; font-size:0.8em;'>"
-            "Access is governed by your Active Directory group membership.<br>"
+            "Access is governed by your OpenShift cluster permissions.<br>"
             "All activity is subject to corporate security policy.</p>",
             unsafe_allow_html=True,
         )
@@ -58,15 +58,15 @@ def _trigger_oidc_redirect(authenticator: OIDCAuthenticator) -> None:
 
     # Use a JS meta-refresh so the browser navigates away (full page redirect).
     # We cannot use st.experimental_rerun() here because we need the browser
-    # to leave the Streamlit origin and visit Azure AD.
+    # to leave the Streamlit origin and visit OpenShift OAuth.
     components.html(
         f"""
         <script>
-          // Intentional top-level navigation to Azure AD
+          // Intentional top-level navigation to OpenShift OAuth
           window.top.location.href = {repr(auth_url)};
         </script>
         """,
         height=0,
     )
-    st.info("Redirecting to Microsoft login…")
+    st.info("Redirecting to OpenShift OAuth…")
     st.stop()

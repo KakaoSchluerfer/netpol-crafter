@@ -8,6 +8,9 @@ Used by:
 from __future__ import annotations
 
 
+# ── OpenShift Router constants ────────────────────────────────────────────────
+INGRESS_CTRL_NS = "openshift-ingress"
+
 # ── Colour palette ────────────────────────────────────────────────────────────
 
 _NS_PALETTE: dict[str, tuple[str, str, str]] = {
@@ -220,6 +223,205 @@ def collect_edges(
     return edges, external_nodes
 
 
+# ── ANP edge collection ───────────────────────────────────────────────────────
+
+def collect_anp_edges(
+    anps: list[dict],
+    workloads: dict[str, dict],
+    ns_labels: dict[str, dict[str, str]],
+    visible_ns: set[str],
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """
+    Process AdminNetworkPolicies and return edges with action labels.
+    Returns {(src_key, dst_key): (ports_label, "ANP:{name} {action}")}
+    Only Allow/Deny actions are included (Pass is skipped).
+    """
+    edges: dict[tuple[str, str], tuple[str, str]] = {}
+
+    for anp in sorted(anps, key=lambda a: a.get("priority", 0)):
+        name = anp["name"]
+        spec = anp.get("spec", {})
+        subject = spec.get("subject", {})
+
+        # Resolve subject → target workloads
+        ns_subj = subject.get("namespaces")
+        pod_subj = subject.get("pods", {})
+        if ns_subj is not None:
+            targets = find_peers(workloads, ns_labels, visible_ns,
+                                 restrict_ns=None, ns_selector=ns_subj, pod_selector=None)
+        else:
+            targets = find_peers(workloads, ns_labels, visible_ns,
+                                 restrict_ns=None,
+                                 ns_selector=pod_subj.get("namespaceSelector"),
+                                 pod_selector=pod_subj.get("podSelector"))
+
+        for rule in spec.get("ingress", []):
+            action = rule.get("action", "Allow")
+            if action == "Pass":
+                continue
+            ports_lbl = _format_anp_ports(rule.get("ports"))
+            for peer in rule.get("from", []):
+                ns_p = peer.get("namespaces")
+                pod_p = peer.get("pods", {})
+                sources = find_peers(workloads, ns_labels, visible_ns,
+                                     restrict_ns=None,
+                                     ns_selector=ns_p if ns_p is not None else pod_p.get("namespaceSelector"),
+                                     pod_selector=None if ns_p is not None else pod_p.get("podSelector"))
+                for src in sources:
+                    for tgt in targets:
+                        if src != tgt:
+                            key = (src, tgt)
+                            label = f"ANP:{name} {action}"
+                            edges[key] = (ports_lbl or "all ports", label)
+
+        for rule in spec.get("egress", []):
+            action = rule.get("action", "Allow")
+            if action == "Pass":
+                continue
+            ports_lbl = _format_anp_ports(rule.get("ports"))
+            for peer in rule.get("to", []):
+                ns_p = peer.get("namespaces")
+                pod_p = peer.get("pods", {})
+                dests = find_peers(workloads, ns_labels, visible_ns,
+                                   restrict_ns=None,
+                                   ns_selector=ns_p if ns_p is not None else pod_p.get("namespaceSelector"),
+                                   pod_selector=None if ns_p is not None else pod_p.get("podSelector"))
+                for dst in dests:
+                    for src in targets:
+                        if src != dst:
+                            key = (src, dst)
+                            label = f"ANP:{name} {action}"
+                            edges[key] = (ports_lbl or "all ports", label)
+
+    return edges
+
+
+def _format_anp_ports(ports: list | None) -> str:
+    if not ports:
+        return ""
+    parts = []
+    for p in ports:
+        pn = p.get("portNumber") or p.get("portRange") or {}
+        proto = pn.get("protocol", "TCP")
+        port = pn.get("port", pn.get("start", ""))
+        end = pn.get("end", "")
+        if end:
+            parts.append(f"{proto}:{port}-{end}")
+        elif port:
+            parts.append(f"{proto}:{port}")
+        else:
+            parts.append(proto)
+    return " / ".join(parts)
+
+
+# ── Route reachability ────────────────────────────────────────────────────────
+
+def check_route_reachability(
+    routes: list[dict],
+    services: list[dict],
+    pods: list[dict],
+    policies: list[dict],
+    ns_labels: dict[str, dict[str, str]],
+) -> list[dict]:
+    """
+    For each route check whether any NetworkPolicy allows ingress from
+    the OpenShift router namespace (openshift-ingress).
+
+    Returns list of {route_name, namespace, host, target_svc, reachable, reason}.
+    """
+    svc_by_key = {(s["namespace"], s["name"]): s for s in services}
+    pods_by_ns: dict[str, list[dict]] = {}
+    for pod in pods:
+        pods_by_ns.setdefault(pod["namespace"], []).append(pod)
+    policies_by_ns: dict[str, list[dict]] = {}
+    for pol in policies:
+        ns = pol.get("metadata", {}).get("namespace", "")
+        policies_by_ns.setdefault(ns, []).append(pol)
+
+    ingress_ns_labels = ns_labels.get(
+        INGRESS_CTRL_NS, {"kubernetes.io/metadata.name": INGRESS_CTRL_NS}
+    )
+
+    results = []
+    for route in routes:
+        ns = route["namespace"]
+        name = route["name"]
+        host = route.get("host", "")
+        target_svc_name = route.get("to", {}).get("name", "")
+
+        if not target_svc_name:
+            results.append({"route_name": name, "namespace": ns, "host": host,
+                            "target_svc": "", "reachable": False,
+                            "reason": "No target service configured"})
+            continue
+
+        svc = svc_by_key.get((ns, target_svc_name))
+        if not svc:
+            results.append({"route_name": name, "namespace": ns, "host": host,
+                            "target_svc": target_svc_name, "reachable": False,
+                            "reason": f"Service '{target_svc_name}' not found"})
+            continue
+
+        svc_selector = svc.get("selector", {})
+        ns_pods = pods_by_ns.get(ns, [])
+        target_pods = (
+            [p for p in ns_pods if all(p.get("labels", {}).get(k) == v
+             for k, v in svc_selector.items())]
+            if svc_selector else ns_pods
+        )
+        if not target_pods:
+            results.append({"route_name": name, "namespace": ns, "host": host,
+                            "target_svc": target_svc_name, "reachable": False,
+                            "reason": "No pods match service selector"})
+            continue
+
+        ns_policies = policies_by_ns.get(ns, [])
+        pod_labels = (target_pods[0].get("workload_labels")
+                      or target_pods[0].get("labels", {}))
+
+        # Find policies with Ingress that select these pods
+        isolating_policies = [
+            pol for pol in ns_policies
+            if "Ingress" in pol.get("spec", {}).get("policyTypes", ["Ingress"])
+            and selector_matches(pod_labels, pol.get("spec", {}).get("podSelector"))
+        ]
+
+        if not isolating_policies:
+            results.append({"route_name": name, "namespace": ns, "host": host,
+                            "target_svc": target_svc_name, "reachable": True,
+                            "reason": "No ingress isolation (no matching NetworkPolicy)"})
+            continue
+
+        allowed = False
+        for pol in isolating_policies:
+            for rule in pol.get("spec", {}).get("ingress", []):
+                peers = rule.get("from", [])
+                if not peers:
+                    allowed = True
+                    break
+                for peer in peers:
+                    if peer.get("ipBlock"):
+                        continue
+                    ns_sel = peer.get("namespaceSelector")
+                    if ns_sel is not None and selector_matches(ingress_ns_labels, ns_sel):
+                        allowed = True
+                        break
+                if allowed:
+                    break
+            if allowed:
+                break
+
+        results.append({
+            "route_name": name, "namespace": ns, "host": host,
+            "target_svc": target_svc_name, "reachable": allowed,
+            "reason": (
+                f"NetworkPolicy allows ingress from '{INGRESS_CTRL_NS}'" if allowed
+                else f"No NetworkPolicy allows ingress from '{INGRESS_CTRL_NS}'"
+            ),
+        })
+    return results
+
+
 # ── DOT builder ───────────────────────────────────────────────────────────────
 
 def _esc(text: str) -> str:
@@ -236,6 +438,8 @@ def build_dot(
     edges: dict[tuple[str, str], list[tuple[str, str]]],
     external_nodes: dict[str, str],
     selected_ns: list[str],
+    anp_edges: dict[tuple[str, str], tuple[str, str]] | None = None,
+    route_results: list[dict] | None = None,
 ) -> str:
     lines: list[str] = [
         "digraph netpol {",
@@ -300,6 +504,7 @@ def build_dot(
     if external_nodes:
         lines.append("")
 
+    # Regular NetworkPolicy edges
     seen: set[tuple[str, str]] = set()
     for (src, dst), annotations in sorted(edges.items()):
         if (src, dst) in seen:
@@ -314,6 +519,47 @@ def build_dot(
             f'  {_nid(src)} -> {_nid(dst)} '
             f'[label="{_esc(label)}", color="{border}", fontcolor="{border}", penwidth=1.8]'
         )
+
+    # ANP edges (purple for Allow, red for Deny)
+    if anp_edges:
+        lines.append("")
+        for (src, dst), (ports_lbl, action_label) in sorted(anp_edges.items()):
+            is_deny = "Deny" in action_label
+            color = "#F44336" if is_deny else "#7B1FA2"
+            style = "dashed"
+            lines.append(
+                f'  {_nid(src)} -> {_nid(dst)} '
+                f'[label="{_esc(action_label + chr(92) + "n" + ports_lbl)}", '
+                f'color="{color}", fontcolor="{color}", style="{style}", penwidth=1.5, arrowsize=0.7]'
+            )
+
+    # Route reachability nodes and edges
+    if route_results:
+        has_router = False
+        for r in route_results:
+            if r["namespace"] not in selected_ns:
+                continue
+            color = "#4CAF50" if r["reachable"] else "#F44336"
+            style = "solid" if r["reachable"] else "dashed"
+
+            if not has_router:
+                lines.append('  "_ocp_router" [label=<<B>OpenShift Router</B>>, shape=diamond, style="filled", fillcolor="#E3F2FD", color="#1565C0"]')
+                has_router = True
+
+            # Find the target workload key
+            target_wk = next(
+                (k for k, w in workloads.items()
+                 if w["namespace"] == r["namespace"] and w["app"] == r["target_svc"]),
+                None
+            )
+            if target_wk:
+                tls_icon = "TLS " if r.get("tls") else ""
+                route_label = f'{tls_icon}{r["host"] or r["route_name"]}'
+                lines.append(
+                    f'  "_ocp_router" -> {_nid(target_wk)} '
+                    f'[label="{_esc(route_label)}", color="{color}", '
+                    f'style="{style}", fontcolor="{color}", penwidth=1.5, arrowsize=0.7]'
+                )
 
     lines.append("}")
     return "\n".join(lines)
@@ -343,8 +589,6 @@ def policy_preview_dot(
     # Collect relevant namespaces:
     #   1. The policy's own namespace (always shown)
     #   2. Any namespace that matches a namespaceSelector in the rules
-    #      (shown even when no pods there match the podSelector — makes
-    #       the policy intent visible even when there are no live connections)
     #   3. Any namespace that appears in an edge (sources / destinations)
     pol_ns = policy_dict.get("metadata", {}).get("namespace", "")
     relevant_ns: set[str] = {pol_ns} if pol_ns else set()
@@ -390,6 +634,8 @@ def cluster_map_dot(
     ns_labels: dict[str, dict[str, str]],
     selected_ns: list[str],
     show_external: bool = True,
+    anps: list[dict] | None = None,
+    route_results: list[dict] | None = None,
 ) -> tuple[str, dict[tuple[str, str], list[tuple[str, str]]], dict[str, str]]:
     """
     Build a DOT diagram for the full cluster map.
@@ -401,5 +647,9 @@ def cluster_map_dot(
     edges, external_nodes = collect_edges(
         policies, workloads, ns_labels, set(selected_ns), show_external
     )
-    dot = build_dot(workloads, ns_labels, edges, external_nodes, selected_ns)
+    anp_edges_dict = collect_anp_edges(anps or [], workloads, ns_labels, set(selected_ns))
+    dot = build_dot(
+        workloads, ns_labels, edges, external_nodes, selected_ns,
+        anp_edges=anp_edges_dict, route_results=route_results,
+    )
     return dot, edges, external_nodes

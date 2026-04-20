@@ -4,8 +4,6 @@ Main policy builder UI.
 Session state keys owned by this module:
   ingress_rules   – list of rule dicts
   egress_rules    – list of rule dicts
-  confirm_apply   – bool, gating the two-step direct-apply confirmation
-  submitted_prs   – list[dict], PRs opened in this session (for sidebar history)
 
 Each rule dict schema:
   {
@@ -42,20 +40,17 @@ import streamlit as st
 import yaml
 
 from config import AppConfig
-from k8s.client import get_cluster_client
-from k8s import (
-    list_namespaces,
-    list_pods_in_namespace,
-    list_all_pods,
-    list_services_in_namespace,
-    list_routes_in_namespace,
-    get_namespace_labels,
-    get_all_namespace_labels,
-    apply_network_policy,
+from k8s.exporter_client import (
+    fetch_snapshot,
+    snapshot_namespaces,
+    snapshot_ns_labels,
+    snapshot_all_pods,
+    snapshot_pods_in_ns,
+    snapshot_services_in_ns,
+    snapshot_routes_in_ns,
+    snapshot_policies,
 )
-from gh.pr import GitHubPRClient, build_pr_body
 from ui.netpol_viz import policy_preview_dot
-from ui.cluster_selector import render_cluster_selector
 
 # ── Label index helpers ───────────────────────────────────────────────────────
 
@@ -92,8 +87,6 @@ _EMPTY_RULE: dict = {
 def _init_state() -> None:
     st.session_state.setdefault("ingress_rules", [])
     st.session_state.setdefault("egress_rules", [])
-    st.session_state.setdefault("confirm_apply", False)
-    st.session_state.setdefault("submitted_prs", [])
     st.session_state.setdefault("target_pod_expressions", [])
 
 
@@ -408,14 +401,11 @@ def _label_multiselect(
     """
     Render a multiselect for label key/value pairs.
     Returns the selected subset as a dict.
-    Widget key should include the source name so that changing the namespace/pod
-    resets the selection automatically.
     """
     if not available:
         return {}
 
     options = list(available.keys())
-    # Retain only keys that still exist in the current options
     valid_current = [k for k in current if k in available]
 
     selected_keys: list[str] = st.multiselect(
@@ -460,15 +450,9 @@ def _render_match_expressions(
     available_keys: list[str] | None = None,
     available_values: dict[str, list[str]] | None = None,
 ) -> list[dict]:
-    """Render an inline editor for matchExpressions. Mutates and returns the list.
-
-    available_keys:   selectbox for the key field when provided; else free-text.
-    available_values: per-key value lists; renders a multiselect for In/NotIn when
-                      the selected key has known values, else falls back to free-text.
-    """
+    """Render an inline editor for matchExpressions. Mutates and returns the list."""
     st.markdown("**matchExpressions**")
 
-    # Show existing expressions with delete buttons
     if expressions:
         to_remove: int | None = None
         for i, expr in enumerate(expressions):
@@ -485,7 +469,6 @@ def _render_match_expressions(
             expressions.pop(to_remove)
             st.rerun()
 
-    # Inline add-form — always visible
     ec1, ec2, ec3, ec4 = st.columns([2, 2, 3, 1])
     if available_keys:
         new_key = ec1.selectbox("Key", [""] + available_keys, key=f"{widget_key}_ekey")
@@ -495,7 +478,6 @@ def _render_match_expressions(
 
     values_list: list[str] = []
     if new_op in ("In", "NotIn"):
-        # Widget key includes new_key so the widget resets when the key changes
         vals_widget_key = f"{widget_key}_evals_{new_key}"
         key_values = (available_values or {}).get(new_key, []) if new_key else []
         if key_values:
@@ -548,14 +530,12 @@ def _render_external_peer(
         st.session_state.pop(hint_key, None)
         raw = raw_input.strip()
         if "/" in raw:
-            # Looks like a CIDR – validate it
             try:
                 net = ipaddress.ip_network(raw, strict=False)
                 st.session_state[cidr_key] = str(net)
             except ValueError as exc:
                 st.session_state[err_key] = f"Invalid CIDR: {exc}"
         else:
-            # Treat as DNS hostname – resolve to IPs
             try:
                 infos = socket.getaddrinfo(raw, None, type=socket.SOCK_STREAM)
                 ips = sorted({info[4][0] for info in infos})
@@ -575,7 +555,6 @@ def _render_external_peer(
     if hint_key in st.session_state:
         st.info(st.session_state[hint_key])
 
-    # Editable CIDR field – pre-populated by the Resolve button via session state
     cidr_val: str = st.text_input(
         "CIDR to use in ipBlock",
         placeholder="e.g. 10.200.64.0/18",
@@ -604,7 +583,7 @@ def _render_external_peer(
 # ── Cluster peer sub-editor ───────────────────────────────────────────────────
 
 def _render_cluster_peer(
-    api_client: Any,
+    snapshot: Any,
     rule: dict,
     rule_idx: int,
     rules_key: str,
@@ -615,7 +594,6 @@ def _render_cluster_peer(
 ) -> None:
     """Render namespace + pod selector with per-label multiselect and matchExpressions."""
 
-    # ── Row 1: namespace / pod selectors + matchLabels ────────────────────────
     col_ns, col_pod = st.columns(2)
 
     avail_ns_keys: list[str] = []
@@ -634,8 +612,9 @@ def _render_cluster_peer(
 
         if selected_ns != "(any namespace)":
             rule["ns"] = selected_ns
-            with st.spinner("Fetching namespace labels…"):
-                avail_ns = get_namespace_labels(api_client, selected_ns)
+            # Get namespace labels from snapshot
+            ns_labels_map = snapshot_ns_labels(snapshot)
+            avail_ns = ns_labels_map.get(selected_ns, {})
             rule["ns_labels_avail"] = avail_ns
             avail_ns_keys = sorted(avail_ns.keys())
             avail_ns_values = {k: [v] for k, v in avail_ns.items()}
@@ -659,8 +638,7 @@ def _render_cluster_peer(
     with col_pod:
         pod_options = ["(any pod)"]
         if selected_ns and selected_ns != "(any namespace)":
-            with st.spinner("Fetching pods…"):
-                pods = list_pods_in_namespace(api_client, selected_ns)
+            pods = snapshot_pods_in_ns(snapshot, selected_ns)
             for pod in pods:
                 pod_map[pod["name"]] = pod
             pod_options += sorted(pod_map.keys())
@@ -704,10 +682,6 @@ def _render_cluster_peer(
                 avail_pod_keys = list(all_pod_label_index.keys())
                 avail_pod_values = all_pod_label_index
 
-    # ── matchExpressions — rendered sequentially at top level ────────────────
-    # st.columns() inside a column context requires Streamlit >=1.37.0.
-    # To stay compatible with >=1.32.0 we avoid nesting: each expression block
-    # is rendered at the expander's top level (no outer column wrapper).
     st.markdown("**namespaceSelector** matchExpressions")
     rule["ns_expressions"] = _render_match_expressions(
         rule.setdefault("ns_expressions", []),
@@ -728,7 +702,7 @@ def _render_cluster_peer(
 # ── Rule editor ───────────────────────────────────────────────────────────────
 
 def _render_rule_editor(
-    api_client: Any,
+    snapshot: Any,
     rule: dict,
     rule_idx: int,
     rules_key: str,
@@ -740,7 +714,6 @@ def _render_rule_editor(
 ) -> None:
     peer_label = "Source" if direction == "Ingress" else "Destination"
 
-    # Egress rules support external (off-cluster) peers; ingress always uses cluster peers
     if direction == "Egress":
         peer_type_display = st.radio(
             "Peer type",
@@ -757,12 +730,11 @@ def _render_rule_editor(
         _render_external_peer(rule, rule_idx, rules_key, all_rules=all_rules)
     else:
         _render_cluster_peer(
-            api_client, rule, rule_idx, rules_key, all_namespaces, peer_label,
+            snapshot, rule, rule_idx, rules_key, all_namespaces, peer_label,
             all_ns_label_index=all_ns_label_index,
             all_pod_label_index=all_pod_label_index,
         )
 
-    # ── Ports ─────────────────────────────────────────────────────────────────
     st.markdown("**Ports** *(leave empty to allow all ports)*")
 
     port_col1, port_col2, port_col3 = st.columns([2, 2, 1])
@@ -792,6 +764,15 @@ def render_policy_builder(config: AppConfig) -> None:
 
     user_info = st.session_state.get("user", {})
 
+    # Fetch snapshot from exporter
+    try:
+        snapshot = fetch_snapshot(config.exporter_url)
+    except Exception as exc:
+        st.error(f"Cannot reach exporter at {config.exporter_url}: {exc}")
+        if config.debug:
+            st.code(traceback.format_exc())
+        st.stop()
+
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("### 👤 Signed in as")
@@ -800,30 +781,18 @@ def render_policy_builder(config: AppConfig) -> None:
         st.caption(user_info.get("email", ""))
         st.divider()
 
-        st.markdown("### 🖥 Cluster")
-        _cluster, api_client = render_cluster_selector(
-            config.clusters, session_key="builder_cluster"
-        )
+        st.markdown(f"### 🖥 Cluster: {config.cluster_name}")
         st.divider()
 
-        if st.button("🔄 Refresh cluster data", use_container_width=True):
+        if st.button("🔄 Refresh cluster data", width="stretch"):
             st.cache_data.clear()
             st.success("Cache cleared – data will reload on next interaction.")
 
         st.divider()
-        if st.button("🚪 Sign out", use_container_width=True, type="secondary"):
+        if st.button("🚪 Sign out", width="stretch", type="secondary"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
-
-        if st.session_state["submitted_prs"]:
-            st.divider()
-            st.markdown("**PRs submitted this session**")
-            for pr in st.session_state["submitted_prs"]:
-                st.markdown(
-                    f"- [{pr['policy']} → {pr['ns']}]({pr['url']})",
-                    unsafe_allow_html=False,
-                )
 
         st.divider()
         st.page_link("pages/How_To_Guide.py", label="📖 How-To Guide", icon=None)
@@ -831,7 +800,7 @@ def render_policy_builder(config: AppConfig) -> None:
         st.markdown(
             "<p style='font-size:0.75em;color:grey'>"
             "Cluster data cached 60 s.<br>"
-            "YAML generated locally – nothing transmitted until you submit a PR."
+            "YAML generated locally – nothing transmitted until you download."
             "</p>",
             unsafe_allow_html=True,
         )
@@ -845,37 +814,34 @@ def render_policy_builder(config: AppConfig) -> None:
 
     if config.test_mode:
         st.warning(
-            "**TEST MODE** – No real cluster or GitHub connections. "
-            "Cluster data is loaded from built-in fixtures. "
-            "PR submission is replaced with a local dry-run preview.",
+            "**TEST MODE** – No real cluster connections. "
+            "Cluster data is loaded from built-in fixtures.",
             icon="🧪",
         )
 
     st.divider()
 
     # ── Load namespace list + global label indexes ────────────────────────────
-    with st.spinner("Loading namespaces…"):
-        try:
-            all_namespaces = list_namespaces(api_client)
-        except Exception as exc:
-            st.error(f"Cannot list namespaces: {exc}")
-            if config.debug:
-                st.code(traceback.format_exc())
-            st.stop()
+    try:
+        all_namespaces = snapshot_namespaces(snapshot)
+    except Exception as exc:
+        st.error(f"Cannot list namespaces: {exc}")
+        if config.debug:
+            st.code(traceback.format_exc())
+        st.stop()
 
-    with st.spinner("Loading label indexes…"):
-        try:
-            all_ns_labels_map = get_all_namespace_labels(api_client)
-            all_ns_label_index = _build_label_index(list(all_ns_labels_map.values()))
-            all_pods_global = list_all_pods(api_client)
-            all_pod_label_index = _build_label_index(
-                [p["workload_labels"] for p in all_pods_global]
-            )
-        except Exception:
-            all_ns_labels_map = {}
-            all_ns_label_index = {}
-            all_pods_global = []
-            all_pod_label_index = {}
+    try:
+        all_ns_labels_map = snapshot_ns_labels(snapshot)
+        all_ns_label_index = _build_label_index(list(all_ns_labels_map.values()))
+        all_pods_global = snapshot_all_pods(snapshot)
+        all_pod_label_index = _build_label_index(
+            [p["workload_labels"] for p in all_pods_global]
+        )
+    except Exception:
+        all_ns_labels_map = {}
+        all_ns_label_index = {}
+        all_pods_global = []
+        all_pod_label_index = {}
 
     # ═══════════════════════════════════════════════════════════════════════════
     # SECTION 1 – Policy Metadata
@@ -908,15 +874,13 @@ def render_policy_builder(config: AppConfig) -> None:
         target_col1, target_col2 = st.columns(2)
 
         with target_col1:
-            with st.spinner("Loading pods…"):
-                target_pods = list_pods_in_namespace(api_client, target_namespace)
+            target_pods = snapshot_pods_in_ns(snapshot, target_namespace)
             target_pod_options = ["(all pods)"] + [p["name"] for p in target_pods]
             target_pod_map = {p["name"]: p for p in target_pods}
 
             selected_target_pod = st.selectbox("Target pod", target_pod_options)
 
         with target_col2:
-            # Build pod label index for this namespace (all pods, then narrow to selection)
             target_ns_pod_index = _build_label_index(
                 [p["workload_labels"] for p in target_pods]
             )
@@ -932,7 +896,6 @@ def render_policy_builder(config: AppConfig) -> None:
                         current=target_pod_labels,
                         widget_key=f"target_pod_lbls_{selected_target_pod}",
                     )
-                    # Narrow to the selected pod's own keys/values
                     avail_target_keys = sorted(avail_target_labels.keys())
                     avail_target_values = {k: [v] for k, v in avail_target_labels.items()}
                     if not target_pod_labels:
@@ -943,7 +906,6 @@ def render_policy_builder(config: AppConfig) -> None:
                         "The policy will match ALL pods in the namespace."
                     )
 
-        # matchExpressions rendered OUTSIDE the selector columns (no nesting)
         st.session_state["target_pod_expressions"] = _render_match_expressions(
             st.session_state["target_pod_expressions"],
             widget_key="target_pod_exprs",
@@ -953,8 +915,7 @@ def render_policy_builder(config: AppConfig) -> None:
 
         # Pre-fill from a Service
         with st.expander("💡 Pre-fill from a Service definition"):
-            with st.spinner("Loading services…"):
-                services = list_services_in_namespace(api_client, target_namespace)
+            services = snapshot_services_in_ns(snapshot, target_namespace)
             svc_map = {s["name"]: s for s in services}
             selected_svc = st.selectbox(
                 "Service", ["(none)"] + sorted(svc_map.keys()), key="target_svc"
@@ -971,8 +932,7 @@ def render_policy_builder(config: AppConfig) -> None:
                     st.warning("This Service has no pod selector (headless or external).")
 
         with st.expander("📡 OpenShift Routes in this namespace"):
-            with st.spinner("Loading routes…"):
-                routes = list_routes_in_namespace(api_client, target_namespace)
+            routes = snapshot_routes_in_ns(snapshot, target_namespace)
             if routes:
                 for route in routes:
                     tls_badge = "🔒" if route["tls"] else "🔓"
@@ -997,7 +957,7 @@ def render_policy_builder(config: AppConfig) -> None:
         rule = st.session_state["ingress_rules"][idx]
         with st.expander(f"Ingress rule #{idx + 1}", expanded=True):
             _render_rule_editor(
-                api_client, rule, idx, "ingress_rules", all_namespaces, "Ingress",
+                snapshot, rule, idx, "ingress_rules", all_namespaces, "Ingress",
                 all_ns_label_index=all_ns_label_index,
                 all_pod_label_index=all_pod_label_index,
             )
@@ -1022,7 +982,7 @@ def render_policy_builder(config: AppConfig) -> None:
         rule = st.session_state["egress_rules"][idx]
         with st.expander(f"Egress rule #{idx + 1}", expanded=True):
             _render_rule_editor(
-                api_client, rule, idx, "egress_rules", all_namespaces, "Egress",
+                snapshot, rule, idx, "egress_rules", all_namespaces, "Egress",
                 all_rules=st.session_state["egress_rules"],
                 all_ns_label_index=all_ns_label_index,
                 all_pod_label_index=all_pod_label_index,
@@ -1036,10 +996,10 @@ def render_policy_builder(config: AppConfig) -> None:
         st.rerun()
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # SECTION 5 – YAML Preview & Submit
+    # SECTION 5 – YAML Preview & Download
     # ═══════════════════════════════════════════════════════════════════════════
     st.divider()
-    st.subheader("5 · YAML preview & submit")
+    st.subheader("5 · YAML preview & download")
 
     ready = policy_name and target_namespace
     if not ready:
@@ -1069,7 +1029,7 @@ def render_policy_builder(config: AppConfig) -> None:
             "match pods in the cluster.",
             icon="ℹ️",
         )
-    st.graphviz_chart(_viz_dot, use_container_width=True)
+    st.graphviz_chart(_viz_dot, width="stretch")
 
     dl_col, _, _ = st.columns([1, 1, 3])
     dl_col.download_button(
@@ -1078,196 +1038,3 @@ def render_policy_builder(config: AppConfig) -> None:
         file_name=f"{policy_name}.yaml",
         mime="text/yaml",
     )
-
-    st.divider()
-
-    tab_pr, tab_apply = st.tabs(["🔀 Open Pull Request  *(GitOps – recommended)*",
-                                  "⚡ Apply directly  *(break-glass only)*"])
-
-    with tab_pr:
-        _render_pr_tab(config, policy_name, target_namespace, policy_dict, yaml_str, user_info)
-
-    with tab_apply:
-        _render_apply_tab(config, config.clusters, policy_name, target_namespace, policy_dict)
-
-
-# ── Tab renderers ─────────────────────────────────────────────────────────────
-
-def _render_pr_tab(
-    config: AppConfig,
-    policy_name: str,
-    namespace: str,
-    policy_dict: dict,
-    yaml_str: str,
-    user_info: dict,
-) -> None:
-    if config.test_mode:
-        import datetime
-        ts = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-        simulated_branch = f"netpol/{namespace}/{policy_name}-{ts}"
-        simulated_path   = f"{config.github_policies_path}/{namespace}/{policy_name}.yaml"
-
-        st.info(
-            "**TEST MODE – dry run.** No PR will be created. "
-            "The panels below show exactly what would be sent to GitHub.",
-            icon="🧪",
-        )
-
-        col_a, col_b = st.columns(2)
-        col_a.metric("Repository", config.github_repo)
-        col_b.metric("Base branch", config.github_base_branch)
-
-        with st.expander("📁 File that would be committed", expanded=True):
-            st.code(simulated_path, language=None)
-            st.code(yaml_str, language="yaml")
-
-        pr_title = st.text_input(
-            "PR title (preview only)",
-            value=f"feat(netpol): {policy_name} in {namespace}",
-        )
-        default_body = build_pr_body(
-            policy_name=policy_name,
-            namespace=namespace,
-            policy_dict=policy_dict,
-            yaml_str=yaml_str,
-            user_info=user_info,
-        )
-        with st.expander("📝 PR description that would be submitted", expanded=False):
-            st.text_area("PR body (read-only preview)", value=default_body, height=400,
-                         disabled=True, label_visibility="collapsed")
-
-        with st.expander("🌿 Git objects that would be created", expanded=False):
-            st.json({
-                "action": "dry-run (TEST_MODE=true)",
-                "repository": config.github_repo,
-                "new_branch": simulated_branch,
-                "base_branch": config.github_base_branch,
-                "committed_file": simulated_path,
-                "pr_title": pr_title,
-            })
-        return
-
-    if not config.github_configured:
-        st.warning(
-            "GitHub integration is not configured. "
-            "Set `GITHUB_REPO` and either `GITHUB_TOKEN` or the `GITHUB_APP_*` "
-            "variables in your `.env` file.",
-            icon="⚠️",
-        )
-        return
-
-    st.markdown(
-        f"**Target repository:** `{config.github_repo}` · "
-        f"base branch: `{config.github_base_branch}` · "
-        f"path: `{config.github_policies_path}/{namespace}/{policy_name}.yaml`"
-    )
-    st.caption(
-        "A new branch `netpol/{namespace}/{policy-name}-{timestamp}` will be created "
-        "and a PR opened against the base branch. ArgoCD will deploy on merge."
-    )
-
-    default_title = f"feat(netpol): {policy_name} in {namespace}"
-    pr_title = st.text_input("PR title", value=default_title)
-
-    default_body = build_pr_body(
-        policy_name=policy_name,
-        namespace=namespace,
-        policy_dict=policy_dict,
-        yaml_str=yaml_str,
-        user_info=user_info,
-    )
-    pr_body = st.text_area("PR description", value=default_body, height=340)
-
-    st.divider()
-
-    if st.button("🔀 Create Pull Request", type="primary", use_container_width=False):
-        with st.spinner("Creating branch and opening PR…"):
-            try:
-                client = GitHubPRClient(config)
-                pr_url = client.create_policy_pr(
-                    policy_yaml=yaml_str,
-                    policy_name=policy_name,
-                    namespace=namespace,
-                    policy_dict=policy_dict,
-                    user_info=user_info,
-                    pr_title=pr_title,
-                    pr_body=pr_body,
-                )
-                st.session_state["submitted_prs"].append(
-                    {"policy": policy_name, "ns": namespace, "url": pr_url}
-                )
-                st.success(
-                    f"✅ Pull Request created: [{pr_title}]({pr_url})",
-                    icon="✅",
-                )
-                st.balloons()
-            except Exception as exc:
-                st.error(f"Failed to create PR: {exc}")
-                if config.debug:
-                    st.code(traceback.format_exc())
-
-
-def _render_apply_tab(
-    config: AppConfig,
-    clusters: tuple | list,
-    policy_name: str,
-    namespace: str,
-    policy_dict: dict,
-) -> None:
-    st.error(
-        "**Break-glass use only.** Applying directly bypasses GitOps, "
-        "skips peer review, and creates drift between the cluster and the "
-        "policy repository. Use only during an active incident.",
-        icon="🚨",
-    )
-
-    # Cluster selector: may differ from the read cluster (e.g. apply to prod, view staging)
-    clusters = list(clusters)
-    if len(clusters) > 1:
-        display_names = [c.get("display_name") or c["name"] for c in clusters]
-        by_display = {(c.get("display_name") or c["name"]): c for c in clusters}
-        chosen_display = st.selectbox(
-            "Apply to cluster",
-            options=display_names,
-            key="apply_target_cluster",
-            help="The cluster this policy will be written to.",
-        )
-        apply_cluster = by_display[chosen_display]
-    else:
-        apply_cluster = clusters[0] if clusters else None
-        if apply_cluster:
-            st.caption(f"Target cluster: **{apply_cluster.get('display_name') or apply_cluster['name']}**")
-
-    apply_client = get_cluster_client(apply_cluster) if apply_cluster else None
-
-    if not st.session_state["confirm_apply"]:
-        if st.button("🚀 Apply directly to cluster", type="primary"):
-            st.session_state["confirm_apply"] = True
-            st.rerun()
-    else:
-        cluster_label = apply_cluster.get("display_name") or apply_cluster["name"] if apply_cluster else "?"
-        st.warning(
-            f"**Confirm:** Apply `{policy_name}` directly to namespace `{namespace}` "
-            f"on **{cluster_label}**? This will not create a PR or git commit."
-        )
-        confirm_col1, confirm_col2 = st.columns(2)
-
-        if confirm_col1.button("✅ Yes, apply now", type="primary"):
-            st.session_state["confirm_apply"] = False
-            with st.spinner("Applying NetworkPolicy…"):
-                try:
-                    result = apply_network_policy(apply_client, policy_dict)
-                    st.success(
-                        f"Policy **{result['name']}** {result['action']} "
-                        f"in namespace **{result['namespace']}** "
-                        f"on **{cluster_label}**. "
-                        "Remember to reconcile the policy repository."
-                    )
-                except Exception as exc:
-                    st.error(f"Apply failed: {exc}")
-                    if config.debug:
-                        st.code(traceback.format_exc())
-
-        if confirm_col2.button("❌ Cancel"):
-            st.session_state["confirm_apply"] = False
-            st.rerun()

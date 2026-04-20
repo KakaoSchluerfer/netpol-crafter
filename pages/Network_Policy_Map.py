@@ -10,39 +10,53 @@ import yaml
 import streamlit as st
 
 from config import get_config
-from k8s import list_network_policies, list_all_pods, get_all_namespace_labels, list_namespaces
-from ui.netpol_viz import ns_palette, build_workloads, cluster_map_dot
-from ui.cluster_selector import render_cluster_selector
+from k8s import (
+    list_network_policies,
+    list_all_pods,
+    get_all_namespace_labels,
+    list_namespaces,
+    list_admin_network_policies,
+    list_baseline_admin_network_policy,
+    list_all_routes,
+    list_all_services,
+)
+from k8s.client import build_user_token_client
+from ui.netpol_viz import ns_palette, build_workloads, cluster_map_dot, check_route_reachability
 
 st.set_page_config(page_title="Network Policy Map", layout="wide")
 
 
 def main() -> None:
-    st.title("🗺 Network Policy Map")
-    st.caption(
-        "Directed graph of allowed pod-to-pod traffic derived from active "
-        "NetworkPolicies. Workloads are resolved to their labels."
-    )
-
     try:
         config = get_config()
     except EnvironmentError as exc:
         st.error(str(exc))
         st.stop()
 
-    # ── Cluster selector (sidebar) ────────────────────────────────────────────
-    st.sidebar.header("Cluster")
-    cluster, client = render_cluster_selector(config.clusters, session_key="map_cluster")
-    if cluster is None:
-        st.stop()
+    st.title(f"🗺 Network Policy Map — {config.cluster_name}")
+    st.caption(
+        "Directed graph of allowed pod-to-pod traffic derived from active "
+        "NetworkPolicies. Workloads are resolved to their labels."
+    )
+
+    # Build user-token ApiClient
+    access_token = st.session_state.get("access_token", "")
+    client = build_user_token_client(access_token, config) if access_token else None
 
     with st.spinner("Loading cluster data…"):
         all_namespaces = list_namespaces(client)
         all_pods = list_all_pods(client)
         ns_labels = get_all_namespace_labels(client)
         policies = list_network_policies(client)
+        anps = list_admin_network_policies(client)
+        all_routes = list_all_routes(client)
+        all_services = list_all_services(client)
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
+    st.sidebar.header("Cluster")
+    st.sidebar.markdown(f"**{config.cluster_name}**")
+    st.sidebar.divider()
+
     st.sidebar.header("Filters")
     selected_ns = st.sidebar.multiselect(
         "Namespaces", options=all_namespaces, default=all_namespaces,
@@ -64,9 +78,19 @@ def main() -> None:
         st.info("Select at least one namespace in the sidebar.")
         return
 
+    # ── Route reachability ────────────────────────────────────────────────────
+    route_results = check_route_reachability(
+        [r for r in all_routes if r["namespace"] in selected_ns],
+        [s for s in all_services if s["namespace"] in selected_ns],
+        [p for p in all_pods if p["namespace"] in selected_ns],
+        [p for p in policies if p.get("metadata", {}).get("namespace") in selected_ns],
+        ns_labels,
+    )
+
     # ── Compute ───────────────────────────────────────────────────────────────
     dot, edges, external_nodes = cluster_map_dot(
-        policies, all_pods, ns_labels, selected_ns, show_external
+        policies, all_pods, ns_labels, selected_ns, show_external,
+        anps=anps, route_results=route_results,
     )
     workloads = build_workloads([p for p in all_pods if p["namespace"] in selected_ns])
     active_policies = [
@@ -74,19 +98,20 @@ def main() -> None:
     ]
 
     # ── Metrics ───────────────────────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Namespaces", len(selected_ns))
     c2.metric("Workloads", len(workloads))
     c3.metric("NetworkPolicies", len(active_policies))
     c4.metric("Allowed flows", len(edges))
+    c5.metric("Routes", len(route_results))
     st.divider()
 
     if not workloads:
         st.warning("No pods found in the selected namespaces.")
         return
 
-    tab_graph, tab_flows, tab_policies, tab_dot = st.tabs(
-        ["📊 Diagram", "🔗 Allowed Flows", "📋 Policies", "⟨/⟩ DOT source"]
+    tab_graph, tab_flows, tab_routes, tab_policies, tab_dot = st.tabs(
+        ["📊 Diagram", "🔗 Allowed Flows", "🛣️ Routes", "📋 Policies", "⟨/⟩ DOT source"]
     )
 
     with tab_graph:
@@ -113,6 +138,28 @@ def main() -> None:
                     "Policy": ", ".join(policy_names),
                 })
             st.dataframe(rows, width="stretch", hide_index=True)
+
+    with tab_routes:
+        if not route_results:
+            st.info("No routes found in selected namespaces.")
+        else:
+            blocked = [r for r in route_results if not r["reachable"]]
+            if blocked:
+                st.error(
+                    f"**{len(blocked)} route(s) blocked** — no NetworkPolicy allows "
+                    "ingress from the OpenShift router."
+                )
+            rows = []
+            for r in sorted(route_results, key=lambda x: (x["namespace"], x["route_name"])):
+                rows.append({
+                    "Status": "Reachable" if r["reachable"] else "Blocked",
+                    "Route": r["route_name"],
+                    "Namespace": r["namespace"],
+                    "Host": r["host"],
+                    "Target Service": r["target_svc"],
+                    "Reason": r["reason"],
+                })
+            st.dataframe(rows, hide_index=True)
 
     with tab_policies:
         if not active_policies:

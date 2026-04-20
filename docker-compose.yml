@@ -5,7 +5,7 @@
 #   open http://localhost:8501
 #
 # ── Production / real cluster ────────────────────────────────────────────────
-#   cp .env.example .env          # fill in real OIDC + GitHub + k8s values
+#   cp .env.example .env          # fill in real OCP OAuth + OCP API values
 #   docker compose up --build
 #
 # How env layering works:
@@ -27,6 +27,8 @@ services:
       - .env.test               # safe committed defaults
       - path: .env              # local production overrides (optional)
         required: false
+    environment:
+      - EXPORTER_URL=http://exporter:8080
     volumes:
       # Mount source for hot-reload during development.
       # Remove this volume block for a clean production-like image test.
@@ -38,5 +40,30 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 20s
+      retries: 3
+    depends_on:
+      - exporter
+    restart: unless-stopped
+
+  exporter:
+    build:
+      context: .
+      dockerfile: exporter/Dockerfile
+    image: netpol-exporter:local
+    container_name: netpol-exporter
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env.test
+      - path: .env
+        required: false
+    environment:
+      - K8S_IN_CLUSTER=false
+      - CLUSTER_NAME=local-dev
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
       retries: 3
     restart: unless-stopped
