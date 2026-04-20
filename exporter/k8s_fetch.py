@@ -23,9 +23,23 @@ from exporter.models import (
     ServiceModel,
     ServicePortModel,
 )
-from k8s.resources import extract_workload_labels, _safe_labels
-
 logger = logging.getLogger(__name__)
+
+_EXCLUDED_LABEL_KEYS = frozenset({
+    "pod-template-hash",
+    "controller-revision-hash",
+    "statefulset.kubernetes.io/pod-name",
+    "deployment.kubernetes.io/revision",
+    "apps.kubernetes.io/pod-index",
+})
+
+
+def _safe_labels(labels) -> dict:
+    return labels or {}
+
+
+def extract_workload_labels(labels: dict) -> dict:
+    return {k: v for k, v in labels.items() if k not in _EXCLUDED_LABEL_KEYS}
 
 _IN_CLUSTER = os.getenv("K8S_IN_CLUSTER", "true").lower() == "true"
 _CLUSTER_NAME = os.getenv("CLUSTER_NAME", "default")
@@ -170,8 +184,68 @@ def _fetch_banp(custom: k8s_client.CustomObjectsApi) -> dict[str, Any] | None:
         raise
 
 
+def _build_fixture_snapshot() -> ClusterSnapshot:
+    """Return a ClusterSnapshot built from fixture data (TEST_MODE)."""
+    import sys, os as _os
+    # Add repo root to path so k8s.fixtures is importable without Streamlit
+    repo_root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("k8s_fixtures", _os.path.join(repo_root, "k8s", "fixtures.py"))
+    _fix_mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_fix_mod)
+    _fix = _fix_mod
+
+    ns_labels_map = _fix.get_all_namespace_labels()
+    namespaces = [
+        NamespaceModel(name=ns, labels=lbls)
+        for ns, lbls in ns_labels_map.items()
+    ]
+    pods = []
+    for p in _fix.get_all_pods():
+        pods.append(PodModel(
+            name=p["name"], namespace=p["namespace"],
+            labels=p.get("labels", {}),
+            workload_labels=p.get("workload_labels", {}),
+            phase=p.get("phase", "Running"),
+        ))
+    services = []
+    for ns in _fix.get_namespaces():
+        for s in _fix.get_services(ns):
+            ports = [ServicePortModel(**pt) for pt in s.get("ports", [])]
+            services.append(ServiceModel(
+                name=s["name"], namespace=s["namespace"],
+                labels=s.get("labels", {}), selector=s.get("selector", {}),
+                ports=ports, type=s.get("type", "ClusterIP"),
+            ))
+    routes = []
+    for ns in _fix.get_namespaces():
+        for r in _fix.get_routes(ns):
+            routes.append(RouteModel(
+                name=r["name"], namespace=r["namespace"],
+                host=r.get("host", ""), path=r.get("path", "/"),
+                to=r.get("to", {}), labels=r.get("labels", {}),
+                tls=r.get("tls", False),
+            ))
+    network_policies = []
+    for pol in _fix.get_network_policies():
+        meta = pol.get("metadata", {})
+        network_policies.append(NetworkPolicyModel(
+            name=meta.get("name", ""), namespace=meta.get("namespace", ""),
+            spec=pol.get("spec", {}),
+        ))
+    return ClusterSnapshot(
+        cluster_name=_CLUSTER_NAME,
+        namespaces=namespaces, pods=pods, services=services,
+        routes=routes, network_policies=network_policies,
+    )
+
+
 def build_snapshot() -> ClusterSnapshot:
     """Fetch all cluster data and return a ClusterSnapshot."""
+    if os.getenv("TEST_MODE", "false").lower() == "true":
+        return _build_fixture_snapshot()
     api_client = _build_api_client()
     core = k8s_client.CoreV1Api(api_client)
     networking = k8s_client.NetworkingV1Api(api_client)
