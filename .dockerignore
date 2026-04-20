@@ -1,0 +1,33 @@
+# Local virtual environment — never needed in images
+.venv
+venv
+env
+
+# Byte-compiled / cache
+__pycache__
+*.py[cod]
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Dev tooling / IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Docs (not needed at runtime)
+docs/
+
+# Temp / OS
+*.DS_Store
+*.log
+
+# Local env overrides (secrets must not leak into images)
+.env

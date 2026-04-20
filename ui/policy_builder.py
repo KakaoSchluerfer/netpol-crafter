@@ -77,7 +77,7 @@ _EMPTY_RULE: dict = {
     "pod_labels_avail": {},
     "pod_labels": {},
     "pod_expressions": [],
-    "cidr": "",
+    "cidrs": [],  # list[str] — multiple ipBlock CIDRs per rule
     "ports": [],
 }
 
@@ -104,8 +104,9 @@ def _remove_rule(key: str, idx: int) -> None:
 def _build_peer(rule: dict) -> dict:
     """Translate a rule dict into a NetworkPolicy peer (from/to entry)."""
     if rule.get("peer_type") == "external":
-        cidr = rule.get("cidr", "").strip()
-        return {"ipBlock": {"cidr": cidr or "0.0.0.0/0"}}
+        cidrs = rule.get("cidrs") or []
+        cidr = cidrs[0] if cidrs else "0.0.0.0/0"
+        return {"ipBlock": {"cidr": cidr}}
 
     # cluster peer
     peer: dict = {}
@@ -175,18 +176,30 @@ def build_network_policy_dict(
         spec["egress"] = []
         covered_nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
         for rule in egress_rules:
-            if rule.get("peer_type") == "external" and rule.get("cidr"):
-                try:
-                    net = ipaddress.ip_network(rule["cidr"], strict=False)
-                    if any(existing.supernet_of(net) or existing == net for existing in covered_nets):
-                        continue
-                    covered_nets.append(net)
-                except ValueError:
-                    pass
-            entry = {"to": [_build_peer(rule)]}
-            if rule.get("ports"):
-                entry["ports"] = _build_port_entries(rule["ports"])
-            spec["egress"].append(entry)
+            if rule.get("peer_type") == "external":
+                cidrs = rule.get("cidrs") or []
+                if not cidrs:
+                    continue
+                valid_cidrs: list[str] = []
+                for c in cidrs:
+                    try:
+                        net = ipaddress.ip_network(c, strict=False)
+                        if not any(existing.supernet_of(net) or existing == net for existing in covered_nets):
+                            covered_nets.append(net)
+                            valid_cidrs.append(str(net))
+                    except ValueError:
+                        pass
+                if not valid_cidrs:
+                    continue
+                entry: dict[str, Any] = {"to": [{"ipBlock": {"cidr": c}} for c in valid_cidrs]}
+                if rule.get("ports"):
+                    entry["ports"] = _build_port_entries(rule["ports"])
+                spec["egress"].append(entry)
+            else:
+                entry = {"to": [_build_peer(rule)]}
+                if rule.get("ports"):
+                    entry["ports"] = _build_port_entries(rule["ports"])
+                spec["egress"].append(entry)
 
     return {
         "apiVersion": "networking.k8s.io/v1",
@@ -432,13 +445,14 @@ def _check_cidr_overlap(
     for idx, rule in enumerate(all_rules):
         if idx == current_idx:
             continue
-        if rule.get("peer_type") == "external" and rule.get("cidr"):
-            try:
-                other_net = ipaddress.ip_network(rule["cidr"], strict=False)
-                if other_net.supernet_of(new_net) or other_net == new_net:
-                    result.append((idx, rule["cidr"]))
-            except ValueError:
-                pass
+        if rule.get("peer_type") == "external":
+            for other_cidr in (rule.get("cidrs") or []):
+                try:
+                    other_net = ipaddress.ip_network(other_cidr, strict=False)
+                    if other_net.supernet_of(new_net) or other_net == new_net:
+                        result.append((idx, other_cidr))
+                except ValueError:
+                    pass
     return result
 
 
@@ -512,72 +526,71 @@ def _render_external_peer(
     """Render the CIDR / DNS resolution section for an external egress peer."""
     st.markdown("**External destination** *(outside the cluster)*")
 
-    raw_key = f"{rules_key}_{rule_idx}_ext_raw"
-    cidr_key = f"{rules_key}_{rule_idx}_cidr_value"
-    err_key  = f"{rules_key}_{rule_idx}_ext_err"
-    hint_key = f"{rules_key}_{rule_idx}_ext_hint"
+    if "cidrs" not in rule:
+        rule["cidrs"] = []
 
+    err_key = f"{rules_key}_{rule_idx}_ext_err"
+
+    # ── DNS / CIDR input ──────────────────────────────────────────────────────
+    raw_key   = f"{rules_key}_{rule_idx}_ext_raw"
     input_col, btn_col = st.columns([5, 1])
     raw_input: str = input_col.text_input(
         "DNS hostname or CIDR subnet",
         placeholder="e.g. api.partner.com  or  10.200.64.0/18",
         key=raw_key,
     )
-    resolve_clicked = btn_col.button("Resolve", key=f"{rules_key}_{rule_idx}_resolve_btn")
+    add_clicked = btn_col.button("＋ Add", key=f"{rules_key}_{rule_idx}_resolve_btn")
 
-    if resolve_clicked and raw_input:
+    if add_clicked and raw_input:
         st.session_state.pop(err_key, None)
-        st.session_state.pop(hint_key, None)
         raw = raw_input.strip()
         if "/" in raw:
             try:
                 net = ipaddress.ip_network(raw, strict=False)
-                st.session_state[cidr_key] = str(net)
+                cidr = str(net)
+                if cidr not in rule["cidrs"]:
+                    rule["cidrs"].append(cidr)
             except ValueError as exc:
                 st.session_state[err_key] = f"Invalid CIDR: {exc}"
         else:
             try:
                 infos = socket.getaddrinfo(raw, None, type=socket.SOCK_STREAM)
-                ips = sorted({info[4][0] for info in infos})
-                st.session_state[cidr_key] = f"{ips[0]}/32"
-                if len(ips) > 1:
-                    st.session_state[hint_key] = (
-                        f"Resolved {len(ips)} addresses: "
-                        + ", ".join(f"`{ip}/32`" for ip in ips)
-                        + ". Only the first is pre-filled; add separate rules for others."
-                    )
+                ips = sorted({info[4][0] for info in infos
+                              if info[0].name == "AF_INET"})  # IPv4 only
+                if not ips:
+                    st.session_state[err_key] = f"No IPv4 addresses resolved for {raw!r}"
+                else:
+                    added = 0
+                    for ip in ips:
+                        cidr = f"{ip}/32"
+                        if cidr not in rule["cidrs"]:
+                            rule["cidrs"].append(cidr)
+                            added += 1
+                    if added:
+                        st.toast(f"Added {added} IP(s) for {raw}")
             except socket.gaierror as exc:
                 st.session_state[err_key] = f"DNS resolution failed: {exc}"
 
     if err_key in st.session_state:
         st.error(st.session_state[err_key])
 
-    if hint_key in st.session_state:
-        st.info(st.session_state[hint_key])
-
-    cidr_val: str = st.text_input(
-        "CIDR to use in ipBlock",
-        placeholder="e.g. 10.200.64.0/18",
-        key=cidr_key,
-    )
-
-    if cidr_val:
-        try:
-            net = ipaddress.ip_network(cidr_val.strip(), strict=False)
-            rule["cidr"] = str(net)
-            st.caption(f"→ `ipBlock.cidr: {rule['cidr']}`")
+    # ── CIDR list ─────────────────────────────────────────────────────────────
+    if rule["cidrs"]:
+        st.caption(f"{len(rule['cidrs'])} endpoint(s) — each becomes an `ipBlock` in the same rule:")
+        for cidx, cidr in enumerate(list(rule["cidrs"])):
+            c_col, del_col = st.columns([6, 1])
+            c_col.code(cidr, language=None)
+            if del_col.button("✕", key=f"{rules_key}_{rule_idx}_del_cidr_{cidx}"):
+                rule["cidrs"].pop(cidx)
+                st.rerun()
             if all_rules is not None:
-                overlaps = _check_cidr_overlap(rule["cidr"], all_rules, rule_idx)
-                for oidx, ocidr in overlaps:
+                for oidx, ocidr in _check_cidr_overlap(cidr, all_rules, rule_idx):
                     st.warning(
-                        f"Already covered by **egress rule #{oidx + 1}** (`{ocidr}`). "
-                        "This rule will be **excluded** from the generated policy."
+                        f"`{cidr}` already covered by **egress rule #{oidx + 1}** (`{ocidr}`) "
+                        "and will be skipped in the generated policy."
                     )
-        except ValueError:
-            st.error(f"Not a valid CIDR: {cidr_val!r}")
-            rule["cidr"] = ""
     else:
-        rule["cidr"] = ""
+        st.caption("No endpoints yet — enter a hostname or CIDR above and click **＋ Add**.")
 
 
 # ── Cluster peer sub-editor ───────────────────────────────────────────────────

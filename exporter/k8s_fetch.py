@@ -235,10 +235,22 @@ def _build_fixture_snapshot() -> ClusterSnapshot:
             name=meta.get("name", ""), namespace=meta.get("namespace", ""),
             spec=pol.get("spec", {}),
         ))
+
+    anps = [
+        AdminNetworkPolicyModel(
+            name=a["name"],
+            priority=a.get("priority", 0),
+            spec=a.get("spec", {}),
+        )
+        for a in _fix.get_admin_network_policies()
+    ]
+
     return ClusterSnapshot(
         cluster_name=_CLUSTER_NAME,
         namespaces=namespaces, pods=pods, services=services,
         routes=routes, network_policies=network_policies,
+        admin_network_policies=anps,
+        baseline_admin_network_policy=_fix.get_baseline_admin_network_policy(),
     )
 
 

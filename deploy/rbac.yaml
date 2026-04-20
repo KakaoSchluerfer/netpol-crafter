@@ -1,60 +1,54 @@
 ---
-# ServiceAccount used by the netpol-crafter Pod.
+# ServiceAccount used by the netpol-exporter pod to read cluster resources.
+# The netpol-crafter (Streamlit) pod itself uses the logged-in user's OAuth
+# token and therefore needs no special RBAC.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: netpol-crafter
+  name: netpol-exporter
   namespace: netpol-crafter
   labels:
-    app.kubernetes.io/name: netpol-crafter
+    app.kubernetes.io/name: netpol-exporter
 
 ---
-# ClusterRole: read-only access to the resources the UI needs to populate dropdowns.
-# Write access is scoped to NetworkPolicies only.
+# ClusterRole: read-only access to everything the exporter needs to snapshot.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: netpol-crafter
+  name: netpol-exporter
   labels:
-    app.kubernetes.io/name: netpol-crafter
+    app.kubernetes.io/name: netpol-exporter
 rules:
-  # List & read namespaces (to populate the namespace dropdown)
   - apiGroups: [""]
-    resources: ["namespaces"]
+    resources: ["namespaces", "pods", "services"]
     verbs: ["get", "list", "watch"]
 
-  # Read pods and their labels (to build podSelector)
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list", "watch"]
-
-  # Read services (to pre-fill selectors from Service definitions)
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "watch"]
-
-  # Create / update NetworkPolicies (the primary write action of this tool)
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch"]
 
-  # Read OpenShift Routes (informational – used to display Route context)
   - apiGroups: ["route.openshift.io"]
     resources: ["routes"]
+    verbs: ["get", "list", "watch"]
+
+  # AdminNetworkPolicy / BaselineAdminNetworkPolicy (OCP 4.14+ / ANP feature gate)
+  # The exporter gracefully handles 404/403 if these CRDs are absent.
+  - apiGroups: ["policy.networking.k8s.io"]
+    resources: ["adminnetworkpolicies", "baselineadminnetworkpolicies"]
     verbs: ["get", "list", "watch"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: netpol-crafter
+  name: netpol-exporter
   labels:
-    app.kubernetes.io/name: netpol-crafter
+    app.kubernetes.io/name: netpol-exporter
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: netpol-crafter
+  name: netpol-exporter
 subjects:
   - kind: ServiceAccount
-    name: netpol-crafter
+    name: netpol-exporter
     namespace: netpol-crafter

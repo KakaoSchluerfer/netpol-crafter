@@ -256,7 +256,7 @@ def list_network_policies(_api_client: k8s_client.ApiClient) -> list[dict[str, A
 def list_admin_network_policies(_api_client) -> list[dict[str, Any]]:
     """Return AdminNetworkPolicy objects (cluster-scoped). Empty list if unavailable."""
     if _TEST_MODE or _api_client is None:
-        return []  # fixtures don't include ANPs currently
+        return _fix.get_admin_network_policies()
     custom = k8s_client.CustomObjectsApi(_api_client)
     try:
         result = custom.list_cluster_custom_object(
@@ -274,7 +274,7 @@ def list_admin_network_policies(_api_client) -> list[dict[str, Any]]:
 def list_baseline_admin_network_policy(_api_client) -> dict[str, Any] | None:
     """Return the single BaselineAdminNetworkPolicy spec, or None."""
     if _TEST_MODE or _api_client is None:
-        return None
+        return _fix.get_baseline_admin_network_policy()
     custom = k8s_client.CustomObjectsApi(_api_client)
     try:
         result = custom.list_cluster_custom_object(

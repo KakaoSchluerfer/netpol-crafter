@@ -67,6 +67,12 @@ NAMESPACE_LABELS: dict[str, dict[str, str]] = {
         "environment": "staging",
         "team": "core-banking",
     },
+    # Not shown in namespace selector but used for route reachability checks
+    "openshift-ingress": {
+        "kubernetes.io/metadata.name": "openshift-ingress",
+        "policy-group.network.openshift.io/ingress": "",
+        "network.openshift.io/policy-group": "ingress",
+    },
 }
 
 # ── Pods ──────────────────────────────────────────────────────────────────────
@@ -480,8 +486,190 @@ NETWORK_POLICIES: list[dict[str, Any]] = [
             }],
         },
     },
+    # Allow OpenShift router ingress to api-gateway (uses OCP ingress namespace label)
+    {
+        "metadata": {"name": "allow-router-to-gateway", "namespace": "api-gateway"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "gateway"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": {
+                        "matchLabels": {"policy-group.network.openshift.io/ingress": ""}
+                    }
+                }],
+                "ports": [
+                    {"protocol": "TCP", "port": 80},
+                    {"protocol": "TCP", "port": 443},
+                ],
+            }],
+        },
+    },
+    # Allow OpenShift router ingress to monitoring/grafana
+    {
+        "metadata": {"name": "allow-router-to-grafana", "namespace": "monitoring"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "grafana"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": {
+                        "matchLabels": {"policy-group.network.openshift.io/ingress": ""}
+                    }
+                }],
+                "ports": [{"protocol": "TCP", "port": 3000}],
+            }],
+        },
+    },
+    # Allow OpenShift router ingress to staging payment-api
+    {
+        "metadata": {"name": "allow-router-to-staging-payment-api", "namespace": "staging"},
+        "spec": {
+            "podSelector": {"matchLabels": {"app": "payment-api"}},
+            "policyTypes": ["Ingress"],
+            "ingress": [{
+                "from": [{
+                    "namespaceSelector": {
+                        "matchLabels": {"policy-group.network.openshift.io/ingress": ""}
+                    }
+                }],
+                "ports": [{"protocol": "TCP", "port": 8080}],
+            }],
+        },
+    },
+    # NOTE: payments/payment-api has NO router ingress policy → blocked (intentional demo)
 ]
+
+
+# ── Admin Network Policies ────────────────────────────────────────────────────
+
+ADMIN_NETWORK_POLICIES: list[dict[str, Any]] = [
+    # Priority 100: Allow egress to internal Artifactory (artifact / image repository)
+    {
+        "name": "allow-egress-artifactory",
+        "priority": 100,
+        "spec": {
+            "priority": 100,
+            "subject": {
+                "namespaces": {
+                    "matchExpressions": [{
+                        "key": "kubernetes.io/metadata.name",
+                        "operator": "NotIn",
+                        "values": ["kube-system", "openshift-ingress", "openshift-monitoring"],
+                    }]
+                }
+            },
+            "egress": [{
+                "action": "Allow",
+                "to": [{"networks": [{"cidr": "10.50.10.100/32"}]}],
+                "ports": [
+                    {"portNumber": {"protocol": "TCP", "port": 443}},
+                    {"portNumber": {"protocol": "TCP", "port": 8443}},
+                ],
+            }],
+        },
+    },
+    # Priority 110: Allow egress to Dynatrace OneAgent collector
+    {
+        "name": "allow-egress-dynatrace",
+        "priority": 110,
+        "spec": {
+            "priority": 110,
+            "subject": {
+                "namespaces": {
+                    "matchLabels": {"environment": "production"},
+                }
+            },
+            "egress": [{
+                "action": "Allow",
+                "to": [{"networks": [{"cidr": "10.100.200.50/32"}]}],
+                "ports": [
+                    {"portNumber": {"protocol": "TCP", "port": 9999}},
+                    {"portNumber": {"protocol": "TCP", "port": 443}},
+                ],
+            }],
+        },
+    },
+    # Priority 120: Allow egress to Splunk HTTP Event Collector
+    {
+        "name": "allow-egress-splunk",
+        "priority": 120,
+        "spec": {
+            "priority": 120,
+            "subject": {
+                "namespaces": {
+                    "matchLabels": {"environment": "production"},
+                }
+            },
+            "egress": [{
+                "action": "Allow",
+                "to": [{"networks": [{"cidr": "10.20.30.0/24"}]}],
+                "ports": [
+                    {"portNumber": {"protocol": "TCP", "port": 8088}},
+                    {"portNumber": {"protocol": "TCP", "port": 8089}},
+                ],
+            }],
+        },
+    },
+    # Priority 130: Allow egress to OpenShift API server (service CIDR gateway)
+    {
+        "name": "allow-egress-ocp-api",
+        "priority": 130,
+        "spec": {
+            "priority": 130,
+            "subject": {
+                "namespaces": {
+                    "matchExpressions": [{
+                        "key": "kubernetes.io/metadata.name",
+                        "operator": "NotIn",
+                        "values": ["kube-system"],
+                    }]
+                }
+            },
+            "egress": [{
+                "action": "Allow",
+                "to": [{"networks": [
+                    {"cidr": "172.30.0.1/32"},   # kubernetes.default svc
+                    {"cidr": "10.0.0.1/32"},     # API server VIP (example)
+                ]}],
+                "ports": [
+                    {"portNumber": {"protocol": "TCP", "port": 443}},
+                    {"portNumber": {"protocol": "TCP", "port": 6443}},
+                ],
+            }],
+        },
+    },
+]
+
+
+BASELINE_ADMIN_NETWORK_POLICY: dict[str, Any] = {
+    "name": "baseline-deny",
+    "spec": {
+        "subject": {
+            "namespaces": {
+                "matchExpressions": [{
+                    "key": "kubernetes.io/metadata.name",
+                    "operator": "NotIn",
+                    "values": [
+                        "kube-system", "openshift-ingress",
+                        "openshift-monitoring", "openshift-dns",
+                    ],
+                }]
+            }
+        },
+        "ingress": [{"action": "Deny", "from": [{"namespaces": {}}]}],
+        "egress":  [{"action": "Deny", "to":   [{"namespaces": {}}]}],
+    },
+}
 
 
 def get_network_policies() -> list[dict[str, Any]]:
     return [dict(p) for p in NETWORK_POLICIES]
+
+
+def get_admin_network_policies() -> list[dict[str, Any]]:
+    return [dict(a) for a in ADMIN_NETWORK_POLICIES]
+
+
+def get_baseline_admin_network_policy() -> dict[str, Any] | None:
+    return dict(BASELINE_ADMIN_NETWORK_POLICY)

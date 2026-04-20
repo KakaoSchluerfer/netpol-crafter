@@ -1,21 +1,24 @@
 FROM python:3.11-slim
 
-# System deps required by the cryptography wheel
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 1000 --no-create-home --shell /sbin/nologin appuser
 
 WORKDIR /app
 
-# Dependency layer (cached unless requirements.txt changes)
-COPY requirements.txt .
+# Dependency layer — cached unless requirements.txt changes
+COPY --chown=1000:1000 requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Source — owned by appuser at copy time, no chown -R needed
+COPY --chown=1000:1000 app.py config.py ./
+COPY --chown=1000:1000 .streamlit/ .streamlit/
+COPY --chown=1000:1000 auth/ auth/
+COPY --chown=1000:1000 k8s/ k8s/
+COPY --chown=1000:1000 pages/ pages/
+COPY --chown=1000:1000 ui/ ui/
 
-# Non-root runtime user (mirrors OpenShift's arbitrary-uid policy)
-RUN useradd --uid 1000 --no-create-home --shell /sbin/nologin appuser \
-    && chown -R appuser:appuser /app
 USER 1000
 
 EXPOSE 8501

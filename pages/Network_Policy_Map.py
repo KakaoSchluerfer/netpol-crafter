@@ -21,7 +21,7 @@ from k8s import (
     list_all_services,
 )
 from k8s.client import build_user_token_client
-from ui.netpol_viz import ns_palette, build_workloads, cluster_map_dot, check_route_reachability
+from ui.netpol_viz import ns_palette, build_workloads, cluster_map_dot, check_route_reachability, route_diagram_dot
 
 st.set_page_config(page_title="Network Policy Map", layout="wide")
 
@@ -59,10 +59,15 @@ def main() -> None:
 
     st.sidebar.header("Filters")
     selected_ns = st.sidebar.multiselect(
-        "Namespaces", options=all_namespaces, default=all_namespaces,
+        "Namespaces", options=all_namespaces, default=[],
         help="Show workloads and policies for these namespaces.",
     )
     show_external = st.sidebar.checkbox("Show external IP blocks", value=True)
+    show_anps = st.sidebar.checkbox(
+        "Show AdminNetworkPolicies",
+        value=False,
+        help="Overlay ANP edges (purple=Allow, red=Deny) on the cluster map.",
+    )
     st.sidebar.divider()
     st.sidebar.subheader("Legend")
     for ns in selected_ns:
@@ -90,7 +95,7 @@ def main() -> None:
     # ── Compute ───────────────────────────────────────────────────────────────
     dot, edges, external_nodes = cluster_map_dot(
         policies, all_pods, ns_labels, selected_ns, show_external,
-        anps=anps, route_results=route_results,
+        anps=anps, route_results=route_results, show_anps=show_anps,
     )
     workloads = build_workloads([p for p in all_pods if p["namespace"] in selected_ns])
     active_policies = [
@@ -98,12 +103,15 @@ def main() -> None:
     ]
 
     # ── Metrics ───────────────────────────────────────────────────────────────
-    c1, c2, c3, c4, c5 = st.columns(5)
+    n_reachable = sum(1 for r in route_results if r["reachable"])
+    n_blocked = len(route_results) - n_reachable
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Namespaces", len(selected_ns))
     c2.metric("Workloads", len(workloads))
     c3.metric("NetworkPolicies", len(active_policies))
     c4.metric("Allowed flows", len(edges))
-    c5.metric("Routes", len(route_results))
+    c5.metric("Routes reachable", n_reachable)
+    c6.metric("Routes blocked", n_blocked, delta=None if n_blocked == 0 else f"-{n_blocked}", delta_color="inverse")
     st.divider()
 
     if not workloads:
@@ -144,22 +152,44 @@ def main() -> None:
             st.info("No routes found in selected namespaces.")
         else:
             blocked = [r for r in route_results if not r["reachable"]]
-            if blocked:
-                st.error(
-                    f"**{len(blocked)} route(s) blocked** — no NetworkPolicy allows "
-                    "ingress from the OpenShift router."
-                )
+            reachable = [r for r in route_results if r["reachable"]]
+
+            # Summary banner
+            col_ok, col_bl = st.columns(2)
+            with col_ok:
+                st.success(f"**{len(reachable)} reachable** — router ingress allowed")
+            with col_bl:
+                if blocked:
+                    st.error(f"**{len(blocked)} blocked** — no NetworkPolicy allows ingress from the OpenShift router")
+                else:
+                    st.success("**0 blocked**")
+
+            st.markdown("#### Route flow diagram")
+            st.caption(
+                "Green = router can reach the backend pod · "
+                "Red dashed = blocked by NetworkPolicy · "
+                "Tip: use `matchLabels: policy-group.network.openshift.io/ingress: \"\"` "
+                "as the `namespaceSelector` in your ingress rule to allow the OCP router."
+            )
+            rdot = route_diagram_dot(
+                route_results, workloads, selected_ns
+            )
+            if rdot:
+                st.graphviz_chart(rdot, use_container_width=True)
+
+            st.markdown("#### Details")
             rows = []
             for r in sorted(route_results, key=lambda x: (x["namespace"], x["route_name"])):
                 rows.append({
-                    "Status": "Reachable" if r["reachable"] else "Blocked",
+                    "Status": "✅ Reachable" if r["reachable"] else "🚫 Blocked",
+                    "TLS": "🔒" if r.get("tls") else "",
                     "Route": r["route_name"],
                     "Namespace": r["namespace"],
                     "Host": r["host"],
                     "Target Service": r["target_svc"],
                     "Reason": r["reason"],
                 })
-            st.dataframe(rows, hide_index=True)
+            st.dataframe(rows, hide_index=True, use_container_width=True)
 
     with tab_policies:
         if not active_policies:

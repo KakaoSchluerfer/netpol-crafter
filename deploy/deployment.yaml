@@ -7,6 +7,9 @@ metadata:
     kubernetes.io/metadata.name: netpol-crafter
 
 ---
+# ── App Secret ────────────────────────────────────────────────────────────────
+# Fill in all REPLACE_ME values before applying.
+# Use Sealed Secrets, Vault, or an OCP ExternalSecret for production.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -14,21 +17,17 @@ metadata:
   namespace: netpol-crafter
 type: Opaque
 stringData:
-  # Fill in before applying.  Use Sealed Secrets or Vault for production.
-  OIDC_CLIENT_ID: "REPLACE_ME"
-  OIDC_CLIENT_SECRET: "REPLACE_ME"
-  AZURE_TENANT_ID: "REPLACE_ME"
-  APP_SECRET_KEY: "REPLACE_ME"
-  OIDC_REDIRECT_URI: "https://netpol-crafter.apps.your-cluster.example.com"
-  # GitHub – use App auth in production
-  GITHUB_REPO: "your-org/network-policies"
-  GITHUB_BASE_BRANCH: "main"
-  GITHUB_POLICIES_PATH: "policies"
-  GITHUB_APP_ID: "REPLACE_ME"
-  GITHUB_APP_INSTALLATION_ID: "REPLACE_ME"
-  # Mount the PEM as a separate Secret volume and set GITHUB_APP_PRIVATE_KEY_PATH instead
+  OCP_CLIENT_ID: "netpol-crafter"
+  OCP_CLIENT_SECRET: "REPLACE_ME"
+  OCP_API_SERVER: "https://api.your-cluster.example.com:6443"
+  OCP_REDIRECT_URI: "https://netpol-crafter.apps.your-cluster.example.com"
+  # Optional: path to a PEM CA bundle mounted as a volume
+  # OCP_CA_CERT_PATH: "/etc/netpol-certs/cluster-ca.crt"
+  CLUSTER_NAME: "Production"
+  APP_SECRET_KEY: "REPLACE_ME"  # python3 -c "import secrets; print(secrets.token_urlsafe(64))"
 
 ---
+# ── netpol-crafter (Streamlit UI) ────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -46,29 +45,35 @@ spec:
       labels:
         app.kubernetes.io/name: netpol-crafter
     spec:
-      serviceAccountName: netpol-crafter
+      # No ServiceAccount needed — user OAuth token is used for K8s API calls
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
       containers:
         - name: app
-          image: ghcr.io/your-org/netpol-crafter:latest  # replace with your registry
+          image: your-registry.example.com/netpol-crafter:latest
           ports:
             - containerPort: 8501
               name: http
-          command: ["streamlit", "run", "app.py",
-                    "--server.port=8501",
-                    "--server.address=0.0.0.0",
-                    "--server.headless=true",
-                    "--server.enableCORS=false",
-                    "--server.enableXsrfProtection=true"]
+          command:
+            - streamlit
+            - run
+            - app.py
+            - "--server.port=8501"
+            - "--server.address=0.0.0.0"
+            - "--server.headless=true"
+            - "--server.enableCORS=false"
+            - "--server.enableXsrfProtection=true"
           envFrom:
             - secretRef:
                 name: netpol-crafter-env
           env:
-            - name: K8S_IN_CLUSTER
-              value: "true"
+            - name: EXPORTER_URL
+              value: "http://netpol-exporter:8080"
+            - name: TEST_MODE
+              value: "false"
           resources:
             requests:
               cpu: 100m
@@ -109,7 +114,7 @@ spec:
       name: http
 
 ---
-# OpenShift Route (TLS edge termination)
+# OpenShift Route — TLS edge termination
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
@@ -125,3 +130,82 @@ spec:
   tls:
     termination: edge
     insecureEdgeTerminationPolicy: Redirect
+
+---
+# ── netpol-exporter (FastAPI) ─────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netpol-exporter
+  namespace: netpol-crafter
+  labels:
+    app.kubernetes.io/name: netpol-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: netpol-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: netpol-exporter
+    spec:
+      serviceAccountName: netpol-exporter
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: exporter
+          image: your-registry.example.com/netpol-exporter:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: K8S_IN_CLUSTER
+              value: "true"
+            - name: CLUSTER_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: netpol-crafter-env
+                  key: CLUSTER_NAME
+            - name: TEST_MODE
+              value: "false"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netpol-exporter
+  namespace: netpol-crafter
+spec:
+  selector:
+    app.kubernetes.io/name: netpol-exporter
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http

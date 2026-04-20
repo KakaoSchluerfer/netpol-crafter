@@ -230,13 +230,15 @@ def collect_anp_edges(
     workloads: dict[str, dict],
     ns_labels: dict[str, dict[str, str]],
     visible_ns: set[str],
-) -> dict[tuple[str, str], tuple[str, str]]:
+) -> tuple[dict[tuple[str, str], tuple[str, str]], dict[str, str]]:
     """
-    Process AdminNetworkPolicies and return edges with action labels.
-    Returns {(src_key, dst_key): (ports_label, "ANP:{name} {action}")}
+    Process AdminNetworkPolicies and return (edges, external_nodes).
+    edges: {(src_key, dst_key): (ports_label, "ANP:{name} {action}")}
+    external_nodes: {cidr: eid}  — for IP-based network peers
     Only Allow/Deny actions are included (Pass is skipped).
     """
     edges: dict[tuple[str, str], tuple[str, str]] = {}
+    external_nodes: dict[str, str] = {}
 
     for anp in sorted(anps, key=lambda a: a.get("priority", 0)):
         name = anp["name"]
@@ -261,6 +263,15 @@ def collect_anp_edges(
                 continue
             ports_lbl = _format_anp_ports(rule.get("ports"))
             for peer in rule.get("from", []):
+                networks = peer.get("networks")
+                if networks is not None:
+                    for net in networks:
+                        cidr = net.get("cidr", "0.0.0.0/0")
+                        eid = "ext_" + cidr.replace("/", "_").replace(".", "_")
+                        external_nodes[cidr] = eid
+                        for tgt in targets:
+                            edges[(eid, tgt)] = (ports_lbl or "all ports", f"ANP:{name} {action}")
+                    continue
                 ns_p = peer.get("namespaces")
                 pod_p = peer.get("pods", {})
                 sources = find_peers(workloads, ns_labels, visible_ns,
@@ -270,9 +281,7 @@ def collect_anp_edges(
                 for src in sources:
                     for tgt in targets:
                         if src != tgt:
-                            key = (src, tgt)
-                            label = f"ANP:{name} {action}"
-                            edges[key] = (ports_lbl or "all ports", label)
+                            edges[(src, tgt)] = (ports_lbl or "all ports", f"ANP:{name} {action}")
 
         for rule in spec.get("egress", []):
             action = rule.get("action", "Allow")
@@ -280,6 +289,15 @@ def collect_anp_edges(
                 continue
             ports_lbl = _format_anp_ports(rule.get("ports"))
             for peer in rule.get("to", []):
+                networks = peer.get("networks")
+                if networks is not None:
+                    for net in networks:
+                        cidr = net.get("cidr", "0.0.0.0/0")
+                        eid = "ext_" + cidr.replace("/", "_").replace(".", "_")
+                        external_nodes[cidr] = eid
+                        for src in targets:
+                            edges[(src, eid)] = (ports_lbl or "all ports", f"ANP:{name} {action}")
+                    continue
                 ns_p = peer.get("namespaces")
                 pod_p = peer.get("pods", {})
                 dests = find_peers(workloads, ns_labels, visible_ns,
@@ -289,11 +307,9 @@ def collect_anp_edges(
                 for dst in dests:
                     for src in targets:
                         if src != dst:
-                            key = (src, dst)
-                            label = f"ANP:{name} {action}"
-                            edges[key] = (ports_lbl or "all ports", label)
+                            edges[(src, dst)] = (ports_lbl or "all ports", f"ANP:{name} {action}")
 
-    return edges
+    return edges, external_nodes
 
 
 def _format_anp_ports(ports: list | None) -> str:
@@ -347,17 +363,18 @@ def check_route_reachability(
         ns = route["namespace"]
         name = route["name"]
         host = route.get("host", "")
+        tls = route.get("tls", False)
         target_svc_name = route.get("to", {}).get("name", "")
 
         if not target_svc_name:
-            results.append({"route_name": name, "namespace": ns, "host": host,
+            results.append({"route_name": name, "namespace": ns, "host": host, "tls": tls,
                             "target_svc": "", "reachable": False,
                             "reason": "No target service configured"})
             continue
 
         svc = svc_by_key.get((ns, target_svc_name))
         if not svc:
-            results.append({"route_name": name, "namespace": ns, "host": host,
+            results.append({"route_name": name, "namespace": ns, "host": host, "tls": tls,
                             "target_svc": target_svc_name, "reachable": False,
                             "reason": f"Service '{target_svc_name}' not found"})
             continue
@@ -370,7 +387,7 @@ def check_route_reachability(
             if svc_selector else ns_pods
         )
         if not target_pods:
-            results.append({"route_name": name, "namespace": ns, "host": host,
+            results.append({"route_name": name, "namespace": ns, "host": host, "tls": tls,
                             "target_svc": target_svc_name, "reachable": False,
                             "reason": "No pods match service selector"})
             continue
@@ -387,7 +404,7 @@ def check_route_reachability(
         ]
 
         if not isolating_policies:
-            results.append({"route_name": name, "namespace": ns, "host": host,
+            results.append({"route_name": name, "namespace": ns, "host": host, "tls": tls,
                             "target_svc": target_svc_name, "reachable": True,
                             "reason": "No ingress isolation (no matching NetworkPolicy)"})
             continue
@@ -412,7 +429,7 @@ def check_route_reachability(
                 break
 
         results.append({
-            "route_name": name, "namespace": ns, "host": host,
+            "route_name": name, "namespace": ns, "host": host, "tls": tls,
             "target_svc": target_svc_name, "reachable": allowed,
             "reason": (
                 f"NetworkPolicy allows ingress from '{INGRESS_CTRL_NS}'" if allowed
@@ -565,6 +582,122 @@ def build_dot(
     return "\n".join(lines)
 
 
+# ── Route-specific diagram ────────────────────────────────────────────────────
+
+def route_diagram_dot(
+    route_results: list[dict],
+    workloads: dict[str, dict],
+    selected_ns: list[str],
+) -> str:
+    """
+    Build a focused DOT diagram showing Route → Service → Workload flow.
+    Edges and route nodes are coloured green (reachable) or red (blocked).
+    """
+    visible = [r for r in route_results if r["namespace"] in selected_ns]
+    if not visible:
+        return ""
+
+    lines: list[str] = [
+        "digraph routes {",
+        '  graph [rankdir=LR, fontname="Helvetica Neue", pad=0.5, nodesep=0.5, ranksep=1.1]',
+        '  node  [fontname="Helvetica Neue", fontsize=10, margin="0.15,0.10"]',
+        '  edge  [fontname="Helvetica Neue", fontsize=9, arrowsize=0.7, arrowhead=vee]',
+        "",
+        '  "_router" [label=<<B>OpenShift Router</B>>, shape=diamond, style="filled",'
+        '   fillcolor="#BBDEFB", color="#1565C0", fontcolor="#0D47A1", width=1.6]',
+        "",
+    ]
+
+    # Group by namespace so we can draw subgraphs
+    ns_routes: dict[str, list[dict]] = {}
+    for r in visible:
+        ns_routes.setdefault(r["namespace"], []).append(r)
+
+    rendered_workloads: set[str] = set()
+
+    for ns in selected_ns:
+        if ns not in ns_routes:
+            continue
+        border, bg, node_fill = ns_palette(ns)
+        safe_ns = ns.replace("-", "_")
+
+        lines += [
+            f"  subgraph cluster_{safe_ns}_r {{",
+            f'    label=<<B>{_esc(ns)}</B>>',
+            f"    style=filled",
+            f'    fillcolor="{bg}"',
+            f'    color="{border}"',
+            f'    fontname="Helvetica Neue"',
+            f'    fontsize=12',
+            "",
+        ]
+
+        for r in ns_routes[ns]:
+            ok = r["reachable"]
+            ec = "#2E7D32" if ok else "#C62828"
+            fc = "#E8F5E9" if ok else "#FFEBEE"
+            st_str = "solid" if ok else "dashed"
+            tls_pfx = "🔒 " if r.get("tls") else ""
+            host = r.get("host") or r["route_name"]
+
+            route_id = f"rt_{safe_ns}_{r['route_name'].replace('-', '_').replace('.', '_')}"
+            svc_id   = f"sv_{safe_ns}_{r['target_svc'].replace('-', '_')}" if r["target_svc"] else ""
+
+            # Route node
+            lines.append(
+                f'    "{route_id}" [label=<<B>{tls_pfx}{_esc(host)}</B>'
+                f'<BR/><FONT POINT-SIZE="8">{_esc(r["reason"])}</FONT>>, '
+                f'shape=box, style="filled,rounded", fillcolor="{fc}", color="{ec}", fontcolor="{ec}"]'
+            )
+
+            if svc_id:
+                # Service node
+                lines.append(
+                    f'    "{svc_id}" [label=<<B>svc/{_esc(r["target_svc"])}</B>>, '
+                    f'shape=box, style="filled", fillcolor="#FFF9C4", color="#F9A825", fontcolor="#E65100"]'
+                )
+                lines.append(
+                    f'    "{route_id}" -> "{svc_id}" [color="{ec}", style="{st_str}"]'
+                )
+
+                # Workload node (render once per key)
+                target_wk = next(
+                    (k for k, w in workloads.items()
+                     if w["namespace"] == ns and w["app"] == r["target_svc"]),
+                    None,
+                )
+                if target_wk and target_wk not in rendered_workloads:
+                    rendered_workloads.add(target_wk)
+                    w = workloads[target_wk]
+                    lines.append(
+                        f'    {_nid(target_wk)} [label=<<B>{_esc(w["app"])}</B>>, '
+                        f'shape=box, style="filled,rounded", fillcolor="{node_fill}", color="{border}"]'
+                    )
+                if target_wk:
+                    lines.append(
+                        f'    "{svc_id}" -> {_nid(target_wk)} [color="{ec}", style="{st_str}"]'
+                    )
+
+        lines += ["  }", ""]
+
+    # Router → route edges (drawn outside subgraphs so graphviz doesn't pull router in)
+    for ns in selected_ns:
+        if ns not in ns_routes:
+            continue
+        safe_ns = ns.replace("-", "_")
+        for r in ns_routes[ns]:
+            ok = r["reachable"]
+            ec = "#2E7D32" if ok else "#C62828"
+            st_str = "solid" if ok else "dashed"
+            route_id = f"rt_{safe_ns}_{r['route_name'].replace('-', '_').replace('.', '_')}"
+            lines.append(
+                f'  "_router" -> "{route_id}" [color="{ec}", style="{st_str}", penwidth=1.8]'
+            )
+
+    lines.append("}")
+    return "\n".join(lines)
+
+
 # ── High-level entry points ───────────────────────────────────────────────────
 
 def policy_preview_dot(
@@ -636,6 +769,7 @@ def cluster_map_dot(
     show_external: bool = True,
     anps: list[dict] | None = None,
     route_results: list[dict] | None = None,
+    show_anps: bool = True,
 ) -> tuple[str, dict[tuple[str, str], list[tuple[str, str]]], dict[str, str]]:
     """
     Build a DOT diagram for the full cluster map.
@@ -647,9 +781,18 @@ def cluster_map_dot(
     edges, external_nodes = collect_edges(
         policies, workloads, ns_labels, set(selected_ns), show_external
     )
-    anp_edges_dict = collect_anp_edges(anps or [], workloads, ns_labels, set(selected_ns))
+
+    anp_edges_dict: dict = {}
+    anp_ext_nodes: dict = {}
+    if show_anps and anps:
+        anp_edges_dict, anp_ext_nodes = collect_anp_edges(
+            anps, workloads, ns_labels, set(selected_ns)
+        )
+
+    all_external = {**external_nodes, **anp_ext_nodes}
     dot = build_dot(
-        workloads, ns_labels, edges, external_nodes, selected_ns,
-        anp_edges=anp_edges_dict, route_results=route_results,
+        workloads, ns_labels, edges, all_external, selected_ns,
+        anp_edges=anp_edges_dict or None,
+        route_results=route_results,
     )
     return dot, edges, external_nodes
