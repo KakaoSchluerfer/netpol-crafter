@@ -188,7 +188,19 @@ def collect_edges(
             pod_selector=spec.get("podSelector"),
         )
 
-        for rule in spec.get("ingress", []):
+        # Respect policyTypes — only visualise directions the policy declares.
+        # K8s default when policyTypes is absent: Ingress always; Egress only if
+        # egress rules are present in the spec.
+        declared = set(spec.get("policyTypes") or [])
+        if not declared:
+            declared.add("Ingress")
+            if spec.get("egress") is not None:
+                declared.add("Egress")
+
+        ingress_rules = spec.get("ingress", []) if "Ingress" in declared else []
+        egress_rules  = spec.get("egress",  []) if "Egress"  in declared else []
+
+        for rule in ingress_rules:
             ports_lbl = format_ports(rule.get("ports"))
             peers = rule.get("from") or []
             if not peers:
@@ -220,7 +232,7 @@ def collect_edges(
                             if src != tgt:
                                 add(src, tgt, ports_lbl, pol_name)
 
-        for rule in spec.get("egress", []):
+        for rule in egress_rules:
             ports_lbl = format_ports(rule.get("ports"))
             peers = rule.get("to") or []
             if not peers:
