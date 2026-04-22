@@ -7,6 +7,7 @@ Used by:
 """
 from __future__ import annotations
 
+import hashlib
 import socket
 from functools import lru_cache
 
@@ -26,6 +27,31 @@ _NS_PALETTE: dict[str, tuple[str, str, str]] = {
     "staging":          ("#880E4F", "#FCE4EC", "#F48FB1"),
 }
 _DEFAULT_PALETTE = ("#455A64", "#F5F5F5", "#CFD8DC")
+
+# ── Per-workload colour palette ───────────────────────────────────────────────
+
+_WORKLOAD_COLORS: list[str] = [
+    "#1565C0", "#2E7D32", "#B71C1C", "#6A1B9A",
+    "#E65100", "#00695C", "#4E342E", "#37474F",
+    "#F57F17", "#880E4F", "#1A237E", "#33691E",
+    "#BF360C", "#006064", "#4A148C", "#827717",
+]
+
+
+def _lighten(color: str, factor: float = 0.12) -> str:
+    r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+    return (
+        f"#{int(r * factor + 255 * (1 - factor)):02X}"
+        f"{int(g * factor + 255 * (1 - factor)):02X}"
+        f"{int(b * factor + 255 * (1 - factor)):02X}"
+    )
+
+
+def _wl_color(key: str) -> tuple[str, str]:
+    """Return (border, fill) for a workload key — deterministic, stable across restarts."""
+    h = int(hashlib.md5(key.encode()).hexdigest(), 16)
+    border = _WORKLOAD_COLORS[h % len(_WORKLOAD_COLORS)]
+    return border, _lighten(border)
 
 
 def ns_palette(ns: str) -> tuple[str, str, str]:
@@ -585,7 +611,7 @@ def build_dot(
     for ns in selected_ns:
         if ns not in by_ns:
             continue
-        border, bg, node_fill = ns_palette(ns)
+        border, bg, _ = ns_palette(ns)
         safe_cluster = ns.replace("-", "_")
 
         lines += [
@@ -602,6 +628,7 @@ def build_dot(
 
         for key in sorted(by_ns[ns]):
             w = workloads[key]
+            wl_border, wl_fill = _wl_color(key)
             secondary = [
                 f"{k}={_esc(str(v))}"
                 for k, v in sorted(w["labels"].items())
@@ -614,7 +641,7 @@ def build_dot(
                 else f'<<B>{_esc(w["app"])}</B>>'
             )
             lines.append(
-                f'    {_nid(key)} [label={lbl}, fillcolor="{node_fill}", color="{border}"]'
+                f'    {_nid(key)} [label={lbl}, fillcolor="{wl_fill}", color="{wl_border}", penwidth=1.5]'
             )
 
         lines += ["  }", ""]
@@ -637,19 +664,67 @@ def build_dot(
     if external_nodes:
         lines.append("")
 
-    # Regular NetworkPolicy edges
+    # ── Collapsing: if every workload in a source namespace goes to the same dst,
+    # replace the individual edges with a single namespace-cluster → dst edge.
+    ns_workloads: dict[str, set[str]] = {}
+    for k in workloads:
+        ns_workloads.setdefault(workloads[k]["namespace"], set()).add(k)
+
+    # Count which src workloads per (src_ns, dst) pair have an edge
+    dst_src_by_ns: dict[tuple[str, str], set[str]] = {}
+    for (src, dst) in edges:
+        if src.startswith("ext_") or src not in workloads:
+            continue
+        src_ns = workloads[src]["namespace"]
+        dst_src_by_ns.setdefault((src_ns, dst), set()).add(src)
+
+    # Collapsible when ≥2 workloads in the namespace and ALL are covered
+    collapsible_src: set[tuple[str, str]] = {
+        (src_ns, dst)
+        for (src_ns, dst), src_set in dst_src_by_ns.items()
+        if len(ns_workloads.get(src_ns, set())) >= 2
+        and src_set >= ns_workloads.get(src_ns, set())
+    }
+
+    # Merge annotations for each collapsed (src_ns, dst) pair
+    collapsed_ann: dict[tuple[str, str], list] = {}
+    for (src, dst), ann in edges.items():
+        if src.startswith("ext_") or src not in workloads:
+            continue
+        src_ns = workloads[src]["namespace"]
+        if (src_ns, dst) in collapsible_src:
+            collapsed_ann.setdefault((src_ns, dst), []).extend(ann)
+
+    # Regular NetworkPolicy edges (skip those folded into a namespace-level edge)
     seen: set[tuple[str, str]] = set()
     for (src, dst), annotations in sorted(edges.items()):
         if (src, dst) in seen:
             continue
         seen.add((src, dst))
+        if src in workloads and (workloads[src]["namespace"], dst) in collapsible_src:
+            continue  # will be drawn as a collapsed edge below
         policy_names = sorted({pn for _, pn in annotations})
         label = merge_edge_ports(annotations) + "\\n(" + ", ".join(policy_names) + ")"
-        dst_ns = workloads[dst]["namespace"] if dst in workloads else ""
-        border, _, _ = ns_palette(dst_ns)
+        if src.startswith("ext_"):
+            color = "#9E9E9E"
+        else:
+            color, _ = _wl_color(src)
         lines.append(
             f'  {_nid(src)} -> {_nid(dst)} '
-            f'[label="{_esc(label)}", color="{border}", fontcolor="{border}", penwidth=1.8]'
+            f'[label="{_esc(label)}", color="{color}", fontcolor="{color}", penwidth=1.8]'
+        )
+
+    # Collapsed namespace → endpoint edges (drawn with ltail for cluster-level origin)
+    for (src_ns, dst), annotations in sorted(collapsed_ann.items()):
+        rep_src = min(ns_workloads[src_ns])  # stable representative node inside the cluster
+        policy_names = sorted({pn for _, pn in annotations})
+        label = merge_edge_ports(annotations) + "\\n(" + ", ".join(policy_names) + ")"
+        ns_border, _, _ = ns_palette(src_ns)
+        safe_src_ns = src_ns.replace("-", "_")
+        lines.append(
+            f'  {_nid(rep_src)} -> {_nid(dst)} '
+            f'[label="{_esc(label)}", color="{ns_border}", fontcolor="{ns_border}", '
+            f'penwidth=2.2, style="bold", ltail="cluster_{safe_src_ns}"]'
         )
 
     # ANP edges — drawn at namespace level using ltail/lhead (compound=true is set on graph)
