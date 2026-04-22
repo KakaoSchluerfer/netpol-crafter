@@ -229,11 +229,17 @@ spec:
               port: 8080
             initialDelaySeconds: 10
             periodSeconds: 30
+          volumeMounts:
+            - name: cache
+              mountPath: /app/cache
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+      volumes:
+        - name: cache
+          emptyDir: {}
 
 ---
 apiVersion: v1

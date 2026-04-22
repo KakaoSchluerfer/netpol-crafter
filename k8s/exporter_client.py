@@ -30,7 +30,7 @@ def fetch_snapshot(exporter_url: str) -> ClusterSnapshot:
         logger.debug("TEST_MODE: building fixture snapshot")
         return _build_fixture_snapshot()
     logger.info("Fetching cluster snapshot from %s", exporter_url)
-    resp = requests.get(f"{exporter_url}/snapshot", timeout=30)
+    resp = requests.get(f"{exporter_url}/get_cluster_data", timeout=30)
     resp.raise_for_status()
     snapshot = ClusterSnapshot.model_validate(resp.json())
     logger.debug("Snapshot: %d namespaces, %d pods, %d policies",
