@@ -1,42 +1,35 @@
 """
-Login page rendered when no authenticated session exists.
+Login page — shown only when the user is not authenticated.
 
-OAuth redirect flow:
-  1. User clicks "Sign in with OpenShift"
-  2. We store the nonce state in st.session_state["oauth_state"]
-  3. A JavaScript redirect sends the browser to OpenShift OAuth
-  4. OpenShift calls back with ?code=&state= → handled in app.py before this page renders
+Note: st.set_page_config() must NOT be called here; it is called once in app.py.
 """
+import logging
+
 import streamlit as st
 import streamlit.components.v1 as components
 
 from auth.oidc import OIDCAuthenticator
 
+logger = logging.getLogger(__name__)
+
 
 def render_login_page(authenticator: OIDCAuthenticator) -> None:
-    st.set_page_config(
-        page_title="NetPol Crafter – Sign In",
-        page_icon="🔐",
-        layout="centered",
-    )
-
-    # ── Centered login card ───────────────────────────────────────────────────
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
         st.markdown("## 🔐 NetPol Crafter")
         st.markdown(
-            "**OpenShift Network Policy builder** – authenticate with your "
+            "**OpenShift Network Policy builder** — authenticate with your "
             "OpenShift account to continue."
         )
         st.divider()
 
         if st.button(
             "Sign in with OpenShift",
-            width="stretch",
+            use_container_width=True,
             type="primary",
             help="Redirects to OpenShift OAuth for authentication",
         ):
-            _trigger_oidc_redirect(authenticator)
+            _start_oidc_redirect(authenticator)
 
         st.markdown(
             "<p style='text-align:center; color:grey; font-size:0.8em;'>"
@@ -46,26 +39,21 @@ def render_login_page(authenticator: OIDCAuthenticator) -> None:
         )
 
 
-def _trigger_oidc_redirect(authenticator: OIDCAuthenticator) -> None:
-    """Generate auth URL, stash state, then redirect the browser via JavaScript."""
+def _start_oidc_redirect(authenticator: OIDCAuthenticator) -> None:
+    """Generate auth URL, store CSRF state, then navigate the browser to OpenShift OAuth."""
     try:
         auth_url, state = authenticator.generate_auth_url()
     except Exception as exc:
+        logger.error("Failed to reach identity provider: %s", exc)
         st.error(f"Could not reach the identity provider: {exc}")
         return
 
     st.session_state["oauth_state"] = state
+    logger.debug("Starting OIDC redirect, state stored in session")
 
-    # Use a JS meta-refresh so the browser navigates away (full page redirect).
-    # We cannot use st.experimental_rerun() here because we need the browser
-    # to leave the Streamlit origin and visit OpenShift OAuth.
+    # JavaScript navigation — Streamlit cannot do a full-page redirect natively.
     components.html(
-        f"""
-        <script>
-          // Intentional top-level navigation to OpenShift OAuth
-          window.top.location.href = {repr(auth_url)};
-        </script>
-        """,
+        f"<script>window.top.location.href = {repr(auth_url)};</script>",
         height=0,
     )
     st.info("Redirecting to OpenShift OAuth…")

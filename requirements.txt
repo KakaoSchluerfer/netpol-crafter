@@ -1,5 +1,5 @@
 # Streamlit UI
-streamlit>=1.32.0
+streamlit>=1.36.0
 
 # Exporter API
 fastapi>=0.111.0

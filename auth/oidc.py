@@ -1,23 +1,19 @@
 """
-OpenShift OAuth authentication.
+OpenShift OAuth — authorization code flow.
 
-Flow (Authorization Code, server-side app):
-  1. generate_auth_url()  → redirect browser to OpenShift OAuth authorize endpoint
-  2. OpenShift calls back with ?code=&state=
+Flow:
+  1. generate_auth_url()  → redirect browser to OpenShift OAuth /authorize
+  2. OpenShift calls back → ?code=<code>&state=<state>
   3. exchange_code()      → POST to /token endpoint
   4. get_user_info()      → GET /apis/user.openshift.io/v1/users/~
-  5. Caller stores token claims in st.session_state – NEVER in a cookie or log.
 
-State is a cryptographically random token stored in st.session_state["oauth_state"]
-and echoed back by OpenShift; we validate it on callback to prevent CSRF.
+CSRF protection: a random `state` token is stored in session and validated on callback.
 
-OpenShift OAuth discovery:
-  GET {ocp_api_server}/.well-known/oauth-authorization-server
-  Returns: {"authorization_endpoint": "...", "token_endpoint": "..."}
-
-The OAuthClient must be pre-registered on the cluster.
+TLS: pass OCP_CA_CERT_PATH to use a custom CA bundle instead of system CAs.
+     Never set verify=False — that removes TLS protection entirely.
 """
 import hmac
+import logging
 import secrets
 from typing import Optional
 from urllib.parse import urlencode
@@ -26,31 +22,31 @@ import requests
 
 from config import AppConfig
 
+logger = logging.getLogger(__name__)
+
 
 class OIDCAuthenticator:
     def __init__(self, config: AppConfig) -> None:
         self._client_id = config.ocp_client_id
         self._client_secret = config.ocp_client_secret
         self._redirect_uri = config.ocp_redirect_uri
-        self._discovery_url = config.oidc_discovery_url
+        self._discovery_url = config.ocp_discovery_url
         self._api_server = config.ocp_api_server
-        self._ca_cert_path = config.ocp_ca_cert_path
+        self._ca_cert = config.ocp_ca_cert_path or True  # path or True = system CAs
         self._app_secret = config.app_secret_key.encode()
         self._metadata: Optional[dict] = None
 
-    # ── TLS helper ───────────────────────────────────────────────────────────
-
-    def _verify(self):
-        """Return the CA cert path (verify=path) or True (system CAs) for requests."""
-        return self._ca_cert_path if self._ca_cert_path else True
-
-    # ── OAuth discovery ──────────────────────────────────────────────────────
+    # ── OAuth discovery ───────────────────────────────────────────────────────
 
     def _get_metadata(self) -> dict:
         if self._metadata is None:
-            resp = requests.get(self._discovery_url, timeout=10, verify=self._verify())
+            logger.debug("Fetching OAuth metadata from %s", self._discovery_url)
+            resp = requests.get(self._discovery_url, timeout=10, verify=self._ca_cert)
             resp.raise_for_status()
             self._metadata = resp.json()
+            logger.debug("OAuth endpoints: authorize=%s token=%s",
+                         self._metadata.get("authorization_endpoint"),
+                         self._metadata.get("token_endpoint"))
         return self._metadata
 
     @property
@@ -61,13 +57,10 @@ class OIDCAuthenticator:
     def token_endpoint(self) -> str:
         return self._get_metadata()["token_endpoint"]
 
-    # ── Auth URL ─────────────────────────────────────────────────────────────
+    # ── Auth URL ──────────────────────────────────────────────────────────────
 
     def generate_auth_url(self) -> tuple[str, str]:
-        """
-        Returns (authorization_url, state).
-        Caller MUST store `state` in st.session_state["oauth_state"] before redirecting.
-        """
+        """Return (authorization_url, state). Store state in session before redirecting."""
         state = secrets.token_urlsafe(32)
         params = urlencode({
             "response_type": "code",
@@ -76,6 +69,7 @@ class OIDCAuthenticator:
             "state": state,
         })
         url = f"{self.authorization_endpoint}?{params}"
+        logger.debug("Generated auth URL for client_id=%s", self._client_id)
         return url, state
 
     # ── Token exchange ────────────────────────────────────────────────────────
@@ -83,14 +77,13 @@ class OIDCAuthenticator:
     def exchange_code(self, code: str, state: str, expected_state: str) -> dict:
         """
         Exchange an authorization code for tokens.
-        Raises ValueError on state mismatch (CSRF guard).
+        Raises ValueError on CSRF state mismatch.
         Raises requests.HTTPError on token endpoint failure.
         """
         if not hmac.compare_digest(state, expected_state):
-            raise ValueError(
-                "OAuth state mismatch – possible CSRF attempt. Login aborted."
-            )
+            raise ValueError("OAuth state mismatch — possible CSRF attempt. Login aborted.")
 
+        logger.debug("Posting to token endpoint: %s", self.token_endpoint)
         resp = requests.post(
             self.token_endpoint,
             data={
@@ -100,46 +93,39 @@ class OIDCAuthenticator:
             },
             auth=(self._client_id, self._client_secret),
             timeout=15,
-            verify=self._verify(),
+            verify=self._ca_cert,
         )
         resp.raise_for_status()
+        logger.info("Token exchange successful")
         return resp.json()
 
     # ── User info ─────────────────────────────────────────────────────────────
 
     def get_user_info(self, access_token: str) -> dict:
         """
-        Fetch user info from /apis/user.openshift.io/v1/users/~.
-
-        OpenShift returns:
-          {"metadata": {"name": "john.doe"}, "fullName": "John Doe", ...}
-
-        We normalise to the keys expected by app.py / display_name():
-          name               → fullName
-          preferred_username → metadata.name
-          email              → metadata.name  (OCP has no email field in user API)
+        Fetch the authenticated user's identity from OpenShift.
+        Returns a normalized dict with: name, preferred_username, email.
         """
+        url = f"{self._api_server}/apis/user.openshift.io/v1/users/~"
+        logger.debug("Fetching user info from %s", url)
         resp = requests.get(
-            f"{self._api_server}/apis/user.openshift.io/v1/users/~",
+            url,
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=10,
-            verify=self._verify(),
+            verify=self._ca_cert,
         )
         resp.raise_for_status()
         raw = resp.json()
 
         username = raw.get("metadata", {}).get("name", "")
         full_name = raw.get("fullName", "") or username
+        logger.info("Got user info: username=%s full_name=%s", username, full_name)
 
         return {
             "name": full_name,
             "preferred_username": username,
-            "email": username,
-            # preserve raw data for callers that want it
-            "_raw": raw,
+            "email": username,  # OCP user API has no email field
         }
-
-    # ── Convenience ───────────────────────────────────────────────────────────
 
     @staticmethod
     def display_name(user_info: dict) -> str:

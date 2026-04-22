@@ -1,10 +1,13 @@
 """
 Network Policy Map — visual connection diagram.
 
-Shows which workloads (resolved by label) can communicate with each other
-based on the NetworkPolicies active in the cluster.
+Shows which workloads can communicate based on active NetworkPolicies.
+Only reachable via st.navigation() after authentication (enforced in app.py).
+Note: st.set_page_config() must NOT be called here; it lives in app.py.
 """
 from __future__ import annotations
+
+import logging
 
 import yaml
 import streamlit as st
@@ -23,10 +26,14 @@ from k8s import (
 from k8s.client import build_user_token_client
 from ui.netpol_viz import ns_palette, build_workloads, cluster_map_dot, check_route_reachability, route_diagram_dot
 
-st.set_page_config(page_title="Network Policy Map", layout="wide")
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    if not st.session_state.get("authenticated"):
+        st.warning("Please sign in to access this page.")
+        st.stop()
+
     try:
         config = get_config()
     except EnvironmentError as exc:
@@ -44,6 +51,7 @@ def main() -> None:
     client = build_user_token_client(access_token, config) if access_token else None
 
     with st.spinner("Loading cluster data…"):
+        logger.info("Fetching cluster snapshot for map")
         all_namespaces = list_namespaces(client)
         all_pods = list_all_pods(client)
         ns_labels = get_all_namespace_labels(client)
@@ -51,6 +59,8 @@ def main() -> None:
         anps = list_admin_network_policies(client)
         all_routes = list_all_routes(client)
         all_services = list_all_services(client)
+        logger.debug("Loaded %d namespaces, %d pods, %d policies, %d ANPs",
+                     len(all_namespaces), len(all_pods), len(policies), len(anps))
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     st.sidebar.header("Cluster")

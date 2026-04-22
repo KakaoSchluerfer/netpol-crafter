@@ -1,26 +1,18 @@
 """
-NetPol Crafter – Streamlit entry point.
+NetPol Crafter — application entry point.
 
-Start with:
-    streamlit run app.py
-
-Auth state machine:
-  ┌─────────────────────────────────────────────────────────┐
-  │  App loads                                              │
-  │     ↓                                                   │
-  │  ?code= in query params?                                │
-  │     ├─ YES → exchange_code() → store in session_state   │
-  │     │        → clear params  → rerun                    │
-  │     └─ NO  ↓                                            │
-  │  session_state["authenticated"]?                        │
-  │     ├─ YES → render_policy_builder()                    │
-  │     └─ NO  → render_login_page()                        │
-  └─────────────────────────────────────────────────────────┘
+Auth flow:
+  1. App loads → if ?code= callback, exchange for token and store in session
+  2. st.navigation() builds the sidebar:
+       unauthenticated → only Sign In page visible
+       authenticated   → Policy Builder, Network Map, How-To Guide
 """
+import logging
 import traceback
 
 import streamlit as st
 
+# Must be the first Streamlit call in the script.
 st.set_page_config(
     page_title="NetPol Crafter",
     page_icon="🔒",
@@ -28,10 +20,18 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging(debug: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
 
 def main() -> None:
-    # Lazy imports keep the first paint fast and avoid importing heavy deps
-    # (kubernetes, authlib) before we know we need them.
     from config import get_config
     from auth.oidc import OIDCAuthenticator
     from ui.auth_page import render_login_page
@@ -43,63 +43,87 @@ def main() -> None:
         st.error(str(exc))
         st.stop()
 
-    # ── Test mode: skip OIDC entirely ────────────────────────────────────────
+    _configure_logging(config.debug)
+
+    # ── Test mode: skip OAuth entirely ───────────────────────────────────────
     if config.test_mode and not st.session_state.get("authenticated"):
-        st.session_state["authenticated"] = True
-        st.session_state["user"] = {
-            "name": "Test Engineer",
-            "email": "test.engineer@bank.internal",
-            "preferred_username": "test.engineer",
-            "sub": "test-user-fixture-001",
-        }
-        st.session_state["access_token"] = "test-token-not-real"
+        st.session_state.update({
+            "authenticated": True,
+            "user": {
+                "name": "Test Engineer",
+                "preferred_username": "test.engineer",
+                "email": "test.engineer@bank.internal",
+                "sub": "test-user-fixture-001",
+            },
+            "access_token": "test-token-not-real",
+        })
+        logger.info("Test mode: auto-authenticated as fixture user")
 
     authenticator = OIDCAuthenticator(config)
 
-    # ── OAuth2 callback handling ──────────────────────────────────────────────
+    # ── OAuth2 callback ───────────────────────────────────────────────────────
     params = st.query_params
     if "code" in params and "state" in params and not st.session_state.get("authenticated"):
         code: str = params["code"]
         returned_state: str = params["state"]
         expected_state: str = st.session_state.get("oauth_state", "")
-
         try:
+            logger.info("Exchanging OAuth authorization code")
             token = authenticator.exchange_code(code, returned_state, expected_state)
             user_info = authenticator.get_user_info(token["access_token"])
         except ValueError as exc:
-            # CSRF state mismatch
+            logger.warning("OAuth state mismatch: %s", exc)
             st.error(f"🚫 {exc}")
             st.session_state.pop("oauth_state", None)
             st.stop()
         except Exception as exc:
+            logger.error("Authentication failed: %s", exc, exc_info=True)
             st.error(f"Authentication failed: {exc}")
             if config.debug:
                 st.code(traceback.format_exc())
             st.stop()
 
-        # Mark session as authenticated – never log the token itself
-        st.session_state["authenticated"] = True
-        st.session_state["user"] = {
-            "name": user_info.get("name"),
-            "email": user_info.get("email") or user_info.get("preferred_username"),
-            "preferred_username": user_info.get("preferred_username"),
-            "sub": user_info.get("sub"),
-        }
-        # Token stored only for potential k8s impersonation; never written to disk
-        st.session_state["access_token"] = token["access_token"]
+        st.session_state.update({
+            "authenticated": True,
+            "user": {
+                "name": user_info.get("name"),
+                "preferred_username": user_info.get("preferred_username"),
+                "email": user_info.get("email"),
+                "sub": user_info.get("sub"),
+            },
+            "access_token": token["access_token"],
+        })
         st.session_state.pop("oauth_state", None)
-
-        # Clear the OAuth params from the browser URL bar before rendering the app
+        logger.info("Authenticated: %s", user_info.get("preferred_username"))
         st.query_params.clear()
         st.rerun()
 
-    # ── Route to login or app ─────────────────────────────────────────────────
-    if not st.session_state.get("authenticated"):
-        render_login_page(authenticator)
-        return
+    # ── Navigation ───────────────────────────────────────────────────────────
+    # st.navigation() controls which pages appear in the sidebar.
+    # Unauthenticated users only see the Sign In page; all others are hidden.
+    if st.session_state.get("authenticated"):
+        pages = [
+            st.Page(
+                lambda: render_policy_builder(config),
+                title="Policy Builder",
+                icon="🔒",
+                default=True,
+            ),
+            st.Page("pages/Network_Policy_Map.py", title="Network Policy Map", icon="🗺"),
+            st.Page("pages/How_To_Guide.py", title="How-To Guide", icon="📖"),
+        ]
+    else:
+        pages = [
+            st.Page(
+                lambda: render_login_page(authenticator),
+                title="Sign In",
+                icon="🔐",
+                default=True,
+            )
+        ]
 
-    render_policy_builder(config)
+    pg = st.navigation(pages, position="sidebar")
+    pg.run()
 
 
-if __name__ == "__main__":
-    main()
+main()

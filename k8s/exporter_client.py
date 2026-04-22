@@ -1,6 +1,7 @@
-"""HTTP client for the netpol-exporter REST API (used by the crafter)."""
+"""HTTP client for the netpol-exporter REST API (used by the Streamlit app)."""
 from __future__ import annotations
 
+import logging
 import os
 
 import requests
@@ -14,8 +15,11 @@ from exporter.models import (
     PodModel,
     RouteModel,
     ServiceModel,
+    ServicePortModel,
 )
 from k8s import fixtures as _fix
+
+logger = logging.getLogger(__name__)
 
 _TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
@@ -23,10 +27,15 @@ _TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_snapshot(exporter_url: str) -> ClusterSnapshot:
     if _TEST_MODE:
+        logger.debug("TEST_MODE: building fixture snapshot")
         return _build_fixture_snapshot()
+    logger.info("Fetching cluster snapshot from %s", exporter_url)
     resp = requests.get(f"{exporter_url}/snapshot", timeout=30)
     resp.raise_for_status()
-    return ClusterSnapshot.model_validate(resp.json())
+    snapshot = ClusterSnapshot.model_validate(resp.json())
+    logger.debug("Snapshot: %d namespaces, %d pods, %d policies",
+                 len(snapshot.namespaces), len(snapshot.pods), len(snapshot.network_policies))
+    return snapshot
 
 
 def _build_fixture_snapshot() -> ClusterSnapshot:
@@ -44,7 +53,6 @@ def _build_fixture_snapshot() -> ClusterSnapshot:
     services = []
     for ns in _fix.get_namespaces():
         for s in _fix.get_services(ns):
-            from exporter.models import ServicePortModel
             ports = [ServicePortModel(**pt) for pt in s.get("ports", [])]
             services.append(ServiceModel(
                 name=s["name"],

@@ -1,15 +1,13 @@
 """
-How-To Guide – Kubernetes / OpenShift NetworkPolicy reference page.
-Accessible without authentication; purely informational.
+How-To Guide — Kubernetes / OpenShift NetworkPolicy reference.
+Only reachable via st.navigation() after authentication (enforced in app.py).
+Note: st.set_page_config() must NOT be called here; it lives in app.py.
 """
 import streamlit as st
 
-st.set_page_config(
-    page_title="NetPol How-To Guide",
-    page_icon="📖",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+if not st.session_state.get("authenticated"):
+    st.warning("Please sign in to access this page.")
+    st.stop()
 
 st.title("📖 NetworkPolicy – How-To Guide")
 st.markdown(

@@ -21,8 +21,29 @@ data:
   EXPORTER_URL: "http://netpol-exporter:8080"
   K8S_IN_CLUSTER: "true"
   TEST_MODE: "false"
-  # Optional: path to a PEM CA bundle mounted as a volume
+  # Uncomment when using a custom cluster CA (see Secret + volume below):
   # OCP_CA_CERT_PATH: "/etc/netpol-certs/cluster-ca.crt"
+
+---
+# ── Cluster CA bundle (optional) ──────────────────────────────────────────────
+# Create this Secret from your actual CA file:
+#   oc create secret generic netpol-crafter-ca \
+#     -n netpol-crafter \
+#     --from-file=cluster-ca.crt=/path/to/your/cluster-ca.crt
+#
+# Then uncomment the volume/volumeMount blocks in the netpol-crafter Deployment
+# and set OCP_CA_CERT_PATH in the ConfigMap above.
+#
+# DO NOT use verify=False — always use the CA bundle for production clusters.
+#
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: netpol-crafter-ca
+#   namespace: netpol-crafter
+# type: Opaque
+# data:
+#   cluster-ca.crt: <base64-encoded PEM>
 
 ---
 # ── Sensitive credentials ─────────────────────────────────────────────────────
@@ -101,11 +122,21 @@ spec:
               port: 8501
             initialDelaySeconds: 20
             periodSeconds: 30
+          # Uncomment to mount the cluster CA bundle (requires netpol-crafter-ca Secret):
+          # volumeMounts:
+          #   - name: cluster-ca
+          #     mountPath: /etc/netpol-certs
+          #     readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false  # Streamlit writes temp files
             capabilities:
               drop: ["ALL"]
+      # Uncomment when using a custom cluster CA:
+      # volumes:
+      #   - name: cluster-ca
+      #     secret:
+      #       secretName: netpol-crafter-ca
 
 ---
 apiVersion: v1

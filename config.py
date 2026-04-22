@@ -1,73 +1,58 @@
 """
-Central configuration – reads from environment variables (or .env via python-dotenv).
-Required variables raise EnvironmentError on startup if absent.
+Central configuration — reads from environment variables (or .env via python-dotenv).
+Missing required variables raise EnvironmentError on startup.
 """
+import logging
 import os
+
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class AppConfig:
-    # ── OpenShift OAuth ───────────────────────────────────────────────────────
-    ocp_api_server: str        # https://api.cluster:6443
-    ocp_client_id: str         # registered OAuthClient name
-    ocp_client_secret: str     # OAuthClient secret
-    ocp_redirect_uri: str      # app callback URL
-    ocp_ca_cert_path: str      # path to CA bundle (empty = system CAs)
+    # OpenShift OAuth
+    ocp_api_server: str     # https://api.cluster:6443
+    ocp_client_id: str      # registered OAuthClient name
+    ocp_client_secret: str  # OAuthClient secret
+    ocp_redirect_uri: str   # app callback URL
+    ocp_ca_cert_path: str   # path to PEM CA bundle; empty = use system CAs
 
-    # ── Exporter ──────────────────────────────────────────────────────────────
-    exporter_url: str          # http://netpol-exporter:8080
+    # Exporter
+    exporter_url: str       # http://netpol-exporter:8080
 
-    # ── Cluster display ───────────────────────────────────────────────────────
-    cluster_name: str          # display name for sidebar
+    # Display
+    cluster_name: str
 
-    # ── App ───────────────────────────────────────────────────────────────────
+    # Application
     app_secret_key: str
     debug: bool
     test_mode: bool
 
-    # ── Backward compat properties used by auth/oidc.py ──────────────────────
-
     @property
-    def oidc_authority(self) -> str:
-        return self.ocp_api_server
-
-    @property
-    def oidc_discovery_url(self) -> str:
+    def ocp_discovery_url(self) -> str:
         return f"{self.ocp_api_server}/.well-known/oauth-authorization-server"
-
-    # Kept so any code that reads these via config doesn't break
-    @property
-    def oidc_client_id(self) -> str:
-        return self.ocp_client_id
-
-    @property
-    def oidc_client_secret(self) -> str:
-        return self.ocp_client_secret
-
-    @property
-    def oidc_redirect_uri(self) -> str:
-        return self.ocp_redirect_uri
 
 
 def get_config() -> AppConfig:
     test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
 
-    _required = ["APP_SECRET_KEY"]
+    required = ["APP_SECRET_KEY"]
     if not test_mode:
-        _required.append("OCP_API_SERVER")
+        required.append("OCP_API_SERVER")
 
-    _missing = [k for k in _required if not os.environ.get(k)]
-    if _missing:
+    missing = [k for k in required if not os.environ.get(k)]
+    if missing:
         raise EnvironmentError(
-            f"Missing required environment variables: {', '.join(_missing)}. "
+            f"Missing required environment variables: {', '.join(missing)}. "
             "Copy .env.example to .env and fill in the values."
         )
 
-    return AppConfig(
+    config = AppConfig(
         ocp_api_server=os.getenv("OCP_API_SERVER", "https://api.test-cluster:6443"),
         ocp_client_id=os.getenv("OCP_CLIENT_ID", "netpol-crafter"),
         ocp_client_secret=os.getenv("OCP_CLIENT_SECRET", ""),
@@ -79,3 +64,10 @@ def get_config() -> AppConfig:
         debug=os.getenv("DEBUG", "false").lower() == "true",
         test_mode=test_mode,
     )
+    logger.debug(
+        "Config loaded — cluster=%s test_mode=%s ca_cert=%s",
+        config.cluster_name,
+        config.test_mode,
+        config.ocp_ca_cert_path or "(system CAs)",
+    )
+    return config

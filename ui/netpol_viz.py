@@ -225,6 +225,20 @@ def collect_edges(
 
 # ── ANP edge collection ───────────────────────────────────────────────────────
 
+def find_ns_peers(
+    ns_labels: dict[str, dict[str, str]],
+    visible_ns: set[str],
+    ns_selector: dict | None,
+) -> list[str]:
+    """Return namespace names that match a namespaceSelector (or all visible if selector is empty/None)."""
+    result = []
+    for ns in visible_ns:
+        lbls = ns_labels.get(ns, {"kubernetes.io/metadata.name": ns})
+        if selector_matches(lbls, ns_selector):
+            result.append(ns)
+    return result
+
+
 def collect_anp_edges(
     anps: list[dict],
     workloads: dict[str, dict],
@@ -233,35 +247,37 @@ def collect_anp_edges(
 ) -> tuple[dict[tuple[str, str], tuple[str, str]], dict[str, str]]:
     """
     Process AdminNetworkPolicies and return (edges, external_nodes).
-    edges: {(src_key, dst_key): (ports_label, "ANP:{name} {action}")}
-    external_nodes: {cidr: eid}  — for IP-based network peers
+
+    ANPs apply at namespace scope, so edges connect namespace names (not pod keys).
+    edges: {(src_ns_or_eid, dst_ns_or_eid): (ports_label, "ANP:{name} {action}")}
+    external_nodes: {cidr: eid}
     Only Allow/Deny actions are included (Pass is skipped).
     """
     edges: dict[tuple[str, str], tuple[str, str]] = {}
     external_nodes: dict[str, str] = {}
 
+    def _subject_namespaces(subject: dict) -> list[str]:
+        ns_subj = subject.get("namespaces")
+        if ns_subj is not None:
+            return find_ns_peers(ns_labels, visible_ns, ns_subj)
+        pod_subj = subject.get("pods", {})
+        wl_keys = find_peers(workloads, ns_labels, visible_ns,
+                             restrict_ns=None,
+                             ns_selector=pod_subj.get("namespaceSelector"),
+                             pod_selector=pod_subj.get("podSelector"))
+        return list({workloads[k]["namespace"] for k in wl_keys})
+
     for anp in sorted(anps, key=lambda a: a.get("priority", 0)):
         name = anp["name"]
         spec = anp.get("spec", {})
-        subject = spec.get("subject", {})
-
-        # Resolve subject → target workloads
-        ns_subj = subject.get("namespaces")
-        pod_subj = subject.get("pods", {})
-        if ns_subj is not None:
-            targets = find_peers(workloads, ns_labels, visible_ns,
-                                 restrict_ns=None, ns_selector=ns_subj, pod_selector=None)
-        else:
-            targets = find_peers(workloads, ns_labels, visible_ns,
-                                 restrict_ns=None,
-                                 ns_selector=pod_subj.get("namespaceSelector"),
-                                 pod_selector=pod_subj.get("podSelector"))
+        target_ns_list = _subject_namespaces(spec.get("subject", {}))
 
         for rule in spec.get("ingress", []):
             action = rule.get("action", "Allow")
             if action == "Pass":
                 continue
             ports_lbl = _format_anp_ports(rule.get("ports"))
+            label = f"ANP:{name} {action}"
             for peer in rule.get("from", []):
                 networks = peer.get("networks")
                 if networks is not None:
@@ -269,25 +285,30 @@ def collect_anp_edges(
                         cidr = net.get("cidr", "0.0.0.0/0")
                         eid = "ext_" + cidr.replace("/", "_").replace(".", "_")
                         external_nodes[cidr] = eid
-                        for tgt in targets:
-                            edges[(eid, tgt)] = (ports_lbl or "all ports", f"ANP:{name} {action}")
+                        for tgt_ns in target_ns_list:
+                            edges[(eid, tgt_ns)] = (ports_lbl or "all ports", label)
                     continue
                 ns_p = peer.get("namespaces")
                 pod_p = peer.get("pods", {})
-                sources = find_peers(workloads, ns_labels, visible_ns,
-                                     restrict_ns=None,
-                                     ns_selector=ns_p if ns_p is not None else pod_p.get("namespaceSelector"),
-                                     pod_selector=None if ns_p is not None else pod_p.get("podSelector"))
-                for src in sources:
-                    for tgt in targets:
-                        if src != tgt:
-                            edges[(src, tgt)] = (ports_lbl or "all ports", f"ANP:{name} {action}")
+                if ns_p is not None:
+                    source_ns = find_ns_peers(ns_labels, visible_ns, ns_p)
+                else:
+                    wl_keys = find_peers(workloads, ns_labels, visible_ns,
+                                        restrict_ns=None,
+                                        ns_selector=pod_p.get("namespaceSelector"),
+                                        pod_selector=pod_p.get("podSelector"))
+                    source_ns = list({workloads[k]["namespace"] for k in wl_keys})
+                for src_ns in source_ns:
+                    for tgt_ns in target_ns_list:
+                        if src_ns != tgt_ns:
+                            edges[(src_ns, tgt_ns)] = (ports_lbl or "all ports", label)
 
         for rule in spec.get("egress", []):
             action = rule.get("action", "Allow")
             if action == "Pass":
                 continue
             ports_lbl = _format_anp_ports(rule.get("ports"))
+            label = f"ANP:{name} {action}"
             for peer in rule.get("to", []):
                 networks = peer.get("networks")
                 if networks is not None:
@@ -295,19 +316,23 @@ def collect_anp_edges(
                         cidr = net.get("cidr", "0.0.0.0/0")
                         eid = "ext_" + cidr.replace("/", "_").replace(".", "_")
                         external_nodes[cidr] = eid
-                        for src in targets:
-                            edges[(src, eid)] = (ports_lbl or "all ports", f"ANP:{name} {action}")
+                        for src_ns in target_ns_list:
+                            edges[(src_ns, eid)] = (ports_lbl or "all ports", label)
                     continue
                 ns_p = peer.get("namespaces")
                 pod_p = peer.get("pods", {})
-                dests = find_peers(workloads, ns_labels, visible_ns,
-                                   restrict_ns=None,
-                                   ns_selector=ns_p if ns_p is not None else pod_p.get("namespaceSelector"),
-                                   pod_selector=None if ns_p is not None else pod_p.get("podSelector"))
-                for dst in dests:
-                    for src in targets:
-                        if src != dst:
-                            edges[(src, dst)] = (ports_lbl or "all ports", f"ANP:{name} {action}")
+                if ns_p is not None:
+                    dest_ns = find_ns_peers(ns_labels, visible_ns, ns_p)
+                else:
+                    wl_keys = find_peers(workloads, ns_labels, visible_ns,
+                                        restrict_ns=None,
+                                        ns_selector=pod_p.get("namespaceSelector"),
+                                        pod_selector=pod_p.get("podSelector"))
+                    dest_ns = list({workloads[k]["namespace"] for k in wl_keys})
+                for dst_ns in dest_ns:
+                    for src_ns in target_ns_list:
+                        if src_ns != dst_ns:
+                            edges[(src_ns, dst_ns)] = (ports_lbl or "all ports", label)
 
     return edges, external_nodes
 
@@ -537,17 +562,45 @@ def build_dot(
             f'[label="{_esc(label)}", color="{border}", fontcolor="{border}", penwidth=1.8]'
         )
 
-    # ANP edges (purple for Allow, red for Deny)
+    # ANP edges — drawn at namespace level using ltail/lhead (compound=true is set on graph)
     if anp_edges:
+        # Pick one representative workload node per namespace for the edge endpoints
+        ns_rep: dict[str, str] = {}
+        for key, w in workloads.items():
+            if w["namespace"] not in ns_rep:
+                ns_rep[w["namespace"]] = key
+
         lines.append("")
         for (src, dst), (ports_lbl, action_label) in sorted(anp_edges.items()):
             is_deny = "Deny" in action_label
             color = "#F44336" if is_deny else "#7B1FA2"
-            style = "dashed"
+
+            src_is_ext = src.startswith("ext_")
+            dst_is_ext = dst.startswith("ext_")
+
+            if src_is_ext:
+                src_node = _nid(src)
+                ltail_attr = ""
+            else:
+                if src not in ns_rep:
+                    continue
+                src_node = _nid(ns_rep[src])
+                ltail_attr = f', ltail="cluster_{src.replace("-", "_")}"'
+
+            if dst_is_ext:
+                dst_node = _nid(dst)
+                lhead_attr = ""
+            else:
+                if dst not in ns_rep:
+                    continue
+                dst_node = _nid(ns_rep[dst])
+                lhead_attr = f', lhead="cluster_{dst.replace("-", "_")}"'
+
             lines.append(
-                f'  {_nid(src)} -> {_nid(dst)} '
+                f'  {src_node} -> {dst_node} '
                 f'[label="{_esc(action_label + chr(92) + "n" + ports_lbl)}", '
-                f'color="{color}", fontcolor="{color}", style="{style}", penwidth=1.5, arrowsize=0.7]'
+                f'color="{color}", fontcolor="{color}", style="dashed", penwidth=1.5, arrowsize=0.7'
+                f'{ltail_attr}{lhead_attr}]'
             )
 
     # Route reachability nodes and edges
