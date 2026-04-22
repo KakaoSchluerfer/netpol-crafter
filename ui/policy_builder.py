@@ -137,8 +137,13 @@ def _build_port_entries(ports: list[dict]) -> list[dict]:
     result = []
     for p in ports:
         entry: dict = {"protocol": p.get("protocol", "TCP")}
-        if p.get("port"):
-            entry["port"] = int(p["port"])
+        if p.get("port") is not None and p.get("port") != "":
+            try:
+                entry["port"] = int(p["port"])
+                if p.get("endPort") is not None and p.get("endPort") != "":
+                    entry["endPort"] = int(p["endPort"])
+            except (ValueError, TypeError):
+                entry["port"] = p["port"]  # named port
         result.append(entry)
     return result
 
@@ -253,7 +258,13 @@ def _ports_summary(ports: list[dict] | None) -> str:
     for p in ports:
         proto = p.get("protocol", "TCP")
         port = p.get("port")
-        items.append(f"{proto}:{port}" if port else str(proto))
+        end_port = p.get("endPort")
+        if port and end_port:
+            items.append(f"{proto}:{port}-{end_port}")
+        elif port:
+            items.append(f"{proto}:{port}")
+        else:
+            items.append(str(proto))
     return ", ".join(items)
 
 
@@ -750,21 +761,31 @@ def _render_rule_editor(
 
     st.markdown("**Ports** *(leave empty to allow all ports)*")
 
-    port_col1, port_col2, port_col3 = st.columns([2, 2, 1])
+    port_col1, port_col2, port_col3, port_col4 = st.columns([2, 2, 2, 1])
     new_protocol = port_col1.selectbox(
         "Protocol", _PROTOCOLS, key=f"{rules_key}_{rule_idx}_proto"
     )
     new_port = port_col2.text_input(
-        "Port (number or name)", key=f"{rules_key}_{rule_idx}_port_input"
+        "Port / Start", key=f"{rules_key}_{rule_idx}_port_input",
+        placeholder="e.g. 80 or http",
     )
-    if port_col3.button("＋ Add Port", key=f"{rules_key}_{rule_idx}_add_port"):
+    new_end_port = port_col3.text_input(
+        "End port (range)", key=f"{rules_key}_{rule_idx}_end_port_input",
+        placeholder="optional",
+    )
+    if port_col4.button("＋ Add", key=f"{rules_key}_{rule_idx}_add_port"):
         if new_port:
-            rule["ports"].append({"protocol": new_protocol, "port": new_port})
+            entry: dict = {"protocol": new_protocol, "port": new_port}
+            if new_end_port.strip():
+                entry["endPort"] = new_end_port.strip()
+            rule["ports"].append(entry)
 
     if rule["ports"]:
         for pidx, p in enumerate(rule["ports"]):
             p_col, del_col = st.columns([5, 1])
-            p_col.code(f"{p['protocol']}:{p['port']}", language=None)
+            end = p.get("endPort")
+            label = f"{p['protocol']}:{p['port']}-{end}" if end else f"{p['protocol']}:{p['port']}"
+            p_col.code(label, language=None)
             if del_col.button("✕", key=f"{rules_key}_{rule_idx}_del_port_{pidx}"):
                 rule["ports"].pop(pidx)
                 st.rerun()

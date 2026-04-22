@@ -111,14 +111,46 @@ def find_peers(
 # ── Port formatting ───────────────────────────────────────────────────────────
 
 def format_ports(ports: list[dict] | None) -> str:
+    """Compact a K8s port list into a human-readable string.
+
+    Adjacent or overlapping numeric port ranges are merged:
+      [{port:80}, {port:81}, {port:82}]  →  TCP:80-82
+      [{port:0, endPort:8000}]           →  TCP:0-8000
+    Named ports and protocol-only entries are left as-is.
+    """
     if not ports:
         return "all ports"
-    parts = []
+
+    by_proto: dict[str, list[tuple[int, int]]] = {}
+    extras: list[str] = []
+
     for p in ports:
         proto = p.get("protocol", "TCP")
-        port = p.get("port", "")
-        parts.append(f"{proto}:{port}" if port else proto)
-    return " / ".join(parts)
+        port = p.get("port")
+        end_port = p.get("endPort")
+        if port is None:
+            extras.append(proto)
+            continue
+        try:
+            start = int(port)
+            end = int(end_port) if end_port is not None else start
+            by_proto.setdefault(proto, []).append((min(start, end), max(start, end)))
+        except (ValueError, TypeError):
+            extras.append(f"{proto}:{port}")
+
+    parts: list[str] = []
+    for proto in sorted(by_proto):
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(by_proto[proto]):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        for start, end in merged:
+            parts.append(f"{proto}:{start}" if start == end else f"{proto}:{start}-{end}")
+
+    parts.extend(extras)
+    return " / ".join(parts) if parts else "all ports"
 
 
 # ── Edge collection ───────────────────────────────────────────────────────────
