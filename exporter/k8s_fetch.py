@@ -255,29 +255,38 @@ def _build_fixture_snapshot() -> ClusterSnapshot:
 
 
 def build_snapshot() -> ClusterSnapshot:
-    """Fetch all cluster data and return a ClusterSnapshot."""
+    """Fetch all cluster data and return a ClusterSnapshot.
+
+    All K8s API calls run in parallel via a thread pool so the total time is
+    bounded by the slowest individual call rather than their sum.
+    """
     if os.getenv("TEST_MODE", "false").lower() == "true":
         return _build_fixture_snapshot()
+
+    from concurrent.futures import ThreadPoolExecutor
+
     api_client = _build_api_client()
     core = k8s_client.CoreV1Api(api_client)
     networking = k8s_client.NetworkingV1Api(api_client)
     custom = k8s_client.CustomObjectsApi(api_client)
 
-    namespaces = _fetch_namespaces(core)
-    pods = _fetch_pods(core)
-    services = _fetch_services(core)
-    routes = _fetch_routes(custom)
-    network_policies = _fetch_network_policies(networking)
-    anps = _fetch_anps(custom)
-    banp = _fetch_banp(custom)
+    logger.info("Fetching cluster data in parallel")
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        f_ns   = pool.submit(_fetch_namespaces, core)
+        f_pods = pool.submit(_fetch_pods, core)
+        f_svcs = pool.submit(_fetch_services, core)
+        f_rts  = pool.submit(_fetch_routes, custom)
+        f_nps  = pool.submit(_fetch_network_policies, networking)
+        f_anps = pool.submit(_fetch_anps, custom)
+        f_banp = pool.submit(_fetch_banp, custom)
 
     return ClusterSnapshot(
         cluster_name=_CLUSTER_NAME,
-        namespaces=namespaces,
-        pods=pods,
-        services=services,
-        routes=routes,
-        network_policies=network_policies,
-        admin_network_policies=anps,
-        baseline_admin_network_policy=banp,
+        namespaces=f_ns.result(),
+        pods=f_pods.result(),
+        services=f_svcs.result(),
+        routes=f_rts.result(),
+        network_policies=f_nps.result(),
+        admin_network_policies=f_anps.result(),
+        baseline_admin_network_policy=f_banp.result(),
     )

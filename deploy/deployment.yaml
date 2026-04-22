@@ -159,6 +159,8 @@ kind: Route
 metadata:
   name: netpol-crafter
   namespace: netpol-crafter
+  annotations:
+    haproxy.router.openshift.io/timeout: 120s
 spec:
   host: netpol-crafter.apps.your-cluster.example.com  # replace
   to:
