@@ -620,8 +620,18 @@ def build_dot(
         lines += ["  }", ""]
 
     for cidr, eid in external_nodes.items():
+        ip = cidr.split("/")[0]
+        host = _resolve_ptr(ip)
+        if host != ip:
+            lbl = (
+                f'<<B>External</B><BR/>'
+                f'<FONT POINT-SIZE="9">{_esc(host)}</FONT><BR/>'
+                f'<FONT POINT-SIZE="8" COLOR="#9E9E9E">{_esc(cidr)}</FONT>>'
+            )
+        else:
+            lbl = f'<<B>External</B><BR/><FONT POINT-SIZE="9">{_esc(cidr)}</FONT>>'
         lines.append(
-            f'  {_nid(eid)} [label=<<B>External</B><BR/><FONT POINT-SIZE="9">{_esc(cidr)}</FONT>>, '
+            f'  {_nid(eid)} [label={lbl}, '
             f'shape=diamond, style="filled,dashed", fillcolor="#F5F5F5", color="#9E9E9E", fontcolor="#616161"]'
         )
     if external_nodes:
