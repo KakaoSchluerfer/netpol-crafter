@@ -63,6 +63,13 @@ def main() -> None:
     logger.debug("Snapshot: %d namespaces, %d pods, %d policies, %d ANPs",
                  len(all_namespaces), len(all_pods), len(policies), len(anps))
 
+    # Build workload-name index once: {namespace: [app, ...]}
+    _all_workloads = build_workloads(all_pods)
+    ns_to_apps: dict[str, list[str]] = {}
+    for w in _all_workloads.values():
+        ns_to_apps.setdefault(w["namespace"], set()).add(w["app"])
+    ns_to_apps = {ns: sorted(apps) for ns, apps in ns_to_apps.items()}
+
     # ── Sidebar ───────────────────────────────────────────────────────────────
     st.sidebar.header("Cluster")
     st.sidebar.markdown(f"**{config.cluster_name}**")
@@ -71,17 +78,37 @@ def main() -> None:
     st.sidebar.header("Filters")
     selected_ns = st.sidebar.multiselect(
         "Namespaces", options=all_namespaces, default=[],
-        help="Show workloads and policies for these namespaces.",
+        help="Select one or more namespaces, then pick workloads within each.",
     )
+
+    # Per-namespace workload filter — shown immediately below the namespace picker
+    ns_selected_apps: dict[str, list[str]] = {}
+    if selected_ns:
+        st.sidebar.markdown("**Workloads**")
+        for ns in selected_ns:
+            apps = ns_to_apps.get(ns, [])
+            ns_selected_apps[ns] = st.sidebar.multiselect(
+                ns,
+                options=apps,
+                default=[],
+                key=f"wl_{ns}",
+                placeholder="Select workloads…" if apps else "No workloads found",
+                disabled=not apps,
+            )
+
     show_external = st.sidebar.checkbox("Show external IP blocks", value=True)
     show_anps = st.sidebar.checkbox(
         "Show AdminNetworkPolicies",
         value=False,
         help="Overlay ANP edges (purple=Allow, red=Deny) on the cluster map.",
     )
+
+    # Only include namespaces where the user picked at least one workload
+    active_ns = [ns for ns in selected_ns if ns_selected_apps.get(ns)]
+
     st.sidebar.divider()
     st.sidebar.subheader("Legend")
-    for ns in selected_ns:
+    for ns in active_ns:
         border, _, fill = ns_palette(ns)
         st.sidebar.markdown(
             f'<span style="display:inline-block;width:14px;height:14px;'
@@ -93,31 +120,45 @@ def main() -> None:
     if not selected_ns:
         st.info("Select at least one namespace in the sidebar.")
         return
+    if not active_ns:
+        st.info("Select at least one workload per namespace in the sidebar.")
+        return
+
+    # Filter pods to only those matching the per-namespace workload selection
+    def _app_of(pod: dict) -> str:
+        labels = pod.get("workload_labels") or pod.get("labels") or {}
+        return labels.get("app") or labels.get("name") or pod["name"].rsplit("-", 2)[0]
+
+    filtered_pods = [
+        p for p in all_pods
+        if p["namespace"] in active_ns
+        and _app_of(p) in ns_selected_apps[p["namespace"]]
+    ]
 
     # ── Route reachability ────────────────────────────────────────────────────
     route_results = check_route_reachability(
-        [r for r in all_routes if r["namespace"] in selected_ns],
-        [s for s in all_services if s["namespace"] in selected_ns],
-        [p for p in all_pods if p["namespace"] in selected_ns],
-        [p for p in policies if p.get("metadata", {}).get("namespace") in selected_ns],
+        [r for r in all_routes if r["namespace"] in active_ns],
+        [s for s in all_services if s["namespace"] in active_ns],
+        filtered_pods,
+        [p for p in policies if p.get("metadata", {}).get("namespace") in active_ns],
         ns_labels,
     )
 
     # ── Compute ───────────────────────────────────────────────────────────────
     dot, edges, external_nodes = cluster_map_dot(
-        policies, all_pods, ns_labels, selected_ns, show_external,
+        policies, filtered_pods, ns_labels, active_ns, show_external,
         anps=anps, route_results=route_results, show_anps=show_anps,
     )
-    workloads = build_workloads([p for p in all_pods if p["namespace"] in selected_ns])
+    workloads = build_workloads(filtered_pods)
     active_policies = [
-        p for p in policies if p.get("metadata", {}).get("namespace") in selected_ns
+        p for p in policies if p.get("metadata", {}).get("namespace") in active_ns
     ]
 
     # ── Metrics ───────────────────────────────────────────────────────────────
     n_reachable = sum(1 for r in route_results if r["reachable"])
     n_blocked = len(route_results) - n_reachable
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Namespaces", len(selected_ns))
+    c1.metric("Namespaces", len(active_ns))
     c2.metric("Workloads", len(workloads))
     c3.metric("NetworkPolicies", len(active_policies))
     c4.metric("Allowed flows", len(edges))
@@ -175,7 +216,7 @@ def main() -> None:
                     st.success("**0 blocked**")
 
             st.markdown("#### Route flow diagram")
-            rdot = route_diagram_dot(route_results, workloads, selected_ns)
+            rdot = route_diagram_dot(route_results, workloads, active_ns)
             if rdot:
                 st.graphviz_chart(rdot, use_container_width=True)
 
