@@ -7,6 +7,9 @@ Used by:
 """
 from __future__ import annotations
 
+import socket
+from functools import lru_cache
+
 
 # ── OpenShift Router constants ────────────────────────────────────────────────
 INGRESS_CTRL_NS = "openshift-ingress"
@@ -153,6 +156,45 @@ def format_ports(ports: list[dict] | None) -> str:
     return " / ".join(parts) if parts else "all ports"
 
 
+# ── DNS helpers ──────────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=256)
+def _resolve_ptr(ip: str) -> str:
+    """Reverse-DNS lookup with 1 s timeout; returns the IP itself on failure."""
+    old = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(1.0)
+        host, _, _ = socket.gethostbyaddr(ip)
+        return host
+    except Exception:
+        return ip
+    finally:
+        socket.setdefaulttimeout(old)
+
+
+def cidr_label(cidr: str) -> str:
+    """Human-readable label for a CIDR.  'hostname (cidr)' when resolvable, else 'cidr'."""
+    ip = cidr.split("/")[0]
+    host = _resolve_ptr(ip)
+    return f"{host} ({cidr})" if host != ip else cidr
+
+
+# ── Port-annotation merger ────────────────────────────────────────────────────
+
+def merge_edge_ports(annotations: list[tuple[list[dict] | None, str]]) -> str:
+    """Merge raw port lists from multiple rules into one compact label.
+
+    annotations is a list of (raw_ports, policy_name) tuples where raw_ports is
+    None (= all ports) or a list of K8s port dicts.
+    """
+    all_ports: list[dict] = []
+    for raw_ports, _ in annotations:
+        if raw_ports is None:
+            return "all ports"
+        all_ports.extend(raw_ports)
+    return format_ports(all_ports) if all_ports else "all ports"
+
+
 # ── Edge collection ───────────────────────────────────────────────────────────
 
 def collect_edges(
@@ -161,16 +203,17 @@ def collect_edges(
     ns_labels: dict[str, dict[str, str]],
     visible_ns: set[str],
     show_external: bool = True,
-) -> tuple[dict[tuple[str, str], list[tuple[str, str]]], dict[str, str]]:
+) -> tuple[dict[tuple[str, str], list[tuple[list[dict] | None, str]]], dict[str, str]]:
     """
     Returns:
-      edges:          {(src_key, dst_key): [(ports_label, policy_name), ...]}
+      edges:          {(src_key, dst_key): [(raw_ports, policy_name), ...]}
+                      raw_ports is None → all ports; list[dict] → K8s port entries
       external_nodes: {cidr_str: node_id}
     """
-    edges: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    edges: dict[tuple[str, str], list[tuple[list[dict] | None, str]]] = {}
     external_nodes: dict[str, str] = {}
 
-    def add(src: str, dst: str, ports: str, name: str) -> None:
+    def add(src: str, dst: str, ports: list[dict] | None, name: str) -> None:
         edges.setdefault((src, dst), []).append((ports, name))
 
     for pol in policies:
@@ -201,13 +244,13 @@ def collect_edges(
         egress_rules  = spec.get("egress",  []) if "Egress"  in declared else []
 
         for rule in ingress_rules:
-            ports_lbl = format_ports(rule.get("ports"))
+            raw_ports = rule.get("ports") or None
             peers = rule.get("from") or []
             if not peers:
                 for src in workloads:
                     for tgt in targets:
                         if src != tgt:
-                            add(src, tgt, ports_lbl, pol_name)
+                            add(src, tgt, raw_ports, pol_name)
                 continue
             for peer in peers:
                 ip_block = peer.get("ipBlock")
@@ -217,7 +260,7 @@ def collect_edges(
                         eid = "ext_" + cidr.replace("/", "_").replace(".", "_")
                         external_nodes[cidr] = eid
                         for tgt in targets:
-                            add(eid, tgt, ports_lbl, pol_name)
+                            add(eid, tgt, raw_ports, pol_name)
                 else:
                     # podSelector-only peer → same namespace as policy (K8s semantics)
                     ns_sel = peer.get("namespaceSelector")
@@ -230,16 +273,16 @@ def collect_edges(
                     for src in sources:
                         for tgt in targets:
                             if src != tgt:
-                                add(src, tgt, ports_lbl, pol_name)
+                                add(src, tgt, raw_ports, pol_name)
 
         for rule in egress_rules:
-            ports_lbl = format_ports(rule.get("ports"))
+            raw_ports = rule.get("ports") or None
             peers = rule.get("to") or []
             if not peers:
                 for dst in workloads:
                     for src in targets:
                         if src != dst:
-                            add(src, dst, ports_lbl, pol_name)
+                            add(src, dst, raw_ports, pol_name)
                 continue
             for peer in peers:
                 ip_block = peer.get("ipBlock")
@@ -249,7 +292,7 @@ def collect_edges(
                         eid = "ext_" + cidr.replace("/", "_").replace(".", "_")
                         external_nodes[cidr] = eid
                         for src in targets:
-                            add(src, eid, ports_lbl, pol_name)
+                            add(src, eid, raw_ports, pol_name)
                 else:
                     # podSelector-only peer → same namespace as policy (K8s semantics)
                     ns_sel = peer.get("namespaceSelector")
@@ -262,7 +305,7 @@ def collect_edges(
                     for dst in dests:
                         for src in targets:
                             if src != dst:
-                                add(src, dst, ports_lbl, pol_name)
+                                add(src, dst, raw_ports, pol_name)
 
     return edges, external_nodes
 
@@ -590,9 +633,8 @@ def build_dot(
         if (src, dst) in seen:
             continue
         seen.add((src, dst))
-        ports_set = sorted({pl for pl, _ in annotations})
         policy_names = sorted({pn for _, pn in annotations})
-        label = " / ".join(ports_set) + "\\n(" + ", ".join(policy_names) + ")"
+        label = merge_edge_ports(annotations) + "\\n(" + ", ".join(policy_names) + ")"
         dst_ns = workloads[dst]["namespace"] if dst in workloads else ""
         border, _, _ = ns_palette(dst_ns)
         lines.append(
@@ -832,6 +874,40 @@ def policy_preview_dot(
     return dot, len(edges)
 
 
+def compute_cluster_data(
+    policies: list[dict],
+    all_pods: list[dict],
+    ns_labels: dict[str, dict[str, str]],
+    selected_ns: list[str],
+    show_external: bool = True,
+    anps: list[dict] | None = None,
+    show_anps: bool = True,
+) -> tuple[
+    dict[str, dict],
+    dict[tuple[str, str], list[tuple[list[dict] | None, str]]],
+    dict[str, str],
+    dict[tuple[str, str], tuple[str, str]],
+    dict[str, str],
+]:
+    """Compute cluster graph data without rendering DOT.
+
+    Returns (workloads, edges, external_nodes, anp_edges, anp_ext_nodes).
+    Separate from rendering so callers can inspect external nodes before filtering.
+    """
+    visible_pods = [p for p in all_pods if p["namespace"] in selected_ns]
+    workloads = build_workloads(visible_pods)
+    edges, external_nodes = collect_edges(
+        policies, workloads, ns_labels, set(selected_ns), show_external
+    )
+    anp_edges_dict: dict = {}
+    anp_ext_nodes: dict = {}
+    if show_anps and anps:
+        anp_edges_dict, anp_ext_nodes = collect_anp_edges(
+            anps, workloads, ns_labels, set(selected_ns)
+        )
+    return workloads, edges, external_nodes, anp_edges_dict, anp_ext_nodes
+
+
 def cluster_map_dot(
     policies: list[dict],
     all_pods: list[dict],
@@ -841,24 +917,26 @@ def cluster_map_dot(
     anps: list[dict] | None = None,
     route_results: list[dict] | None = None,
     show_anps: bool = True,
-) -> tuple[str, dict[tuple[str, str], list[tuple[str, str]]], dict[str, str]]:
-    """
-    Build a DOT diagram for the full cluster map.
+    ext_filter: set[str] | None = None,
+) -> tuple[str, dict[tuple[str, str], list[tuple[list[dict] | None, str]]], dict[str, str]]:
+    """Build a DOT diagram for the full cluster map.
 
     Returns (dot_string, edges, external_nodes).
+    ext_filter: if set, only CIDRs in this set are included as external nodes.
     """
-    visible_pods = [p for p in all_pods if p["namespace"] in selected_ns]
-    workloads = build_workloads(visible_pods)
-    edges, external_nodes = collect_edges(
-        policies, workloads, ns_labels, set(selected_ns), show_external
+    workloads, edges, external_nodes, anp_edges_dict, anp_ext_nodes = compute_cluster_data(
+        policies, all_pods, ns_labels, selected_ns, show_external, anps, show_anps
     )
 
-    anp_edges_dict: dict = {}
-    anp_ext_nodes: dict = {}
-    if show_anps and anps:
-        anp_edges_dict, anp_ext_nodes = collect_anp_edges(
-            anps, workloads, ns_labels, set(selected_ns)
-        )
+    if ext_filter is not None:
+        filtered_ext = {c: e for c, e in external_nodes.items() if c in ext_filter}
+        kept_eids = set(filtered_ext.values())
+        edges = {
+            (src, dst): v for (src, dst), v in edges.items()
+            if not (src.startswith("ext_") and src not in kept_eids)
+            and not (dst.startswith("ext_") and dst not in kept_eids)
+        }
+        external_nodes = filtered_ext
 
     all_external = {**external_nodes, **anp_ext_nodes}
     dot = build_dot(

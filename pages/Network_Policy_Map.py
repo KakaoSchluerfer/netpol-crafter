@@ -23,7 +23,11 @@ from k8s.exporter_client import (
     snapshot_policies,
     snapshot_anps,
 )
-from ui.netpol_viz import ns_palette, build_workloads, cluster_map_dot, check_route_reachability, route_diagram_dot
+from ui.netpol_viz import (
+    ns_palette, build_workloads, compute_cluster_data, build_dot,
+    cluster_map_dot, check_route_reachability, route_diagram_dot,
+    cidr_label, merge_edge_ports,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +175,39 @@ def main() -> None:
         )
     ]
 
+    # ── Pre-compute cluster data (needed for external IP sidebar) ─────────────
+    workloads, edges_all, ext_nodes_all, anp_edges_pre, anp_ext_pre = compute_cluster_data(
+        visible_policies, filtered_pods, ns_labels, active_ns, show_external,
+        anps=anps, show_anps=show_anps,
+    )
+
+    # ── Sidebar: External IP filter ───────────────────────────────────────────
+    selected_ext: set[str] | None = None
+    if show_external and ext_nodes_all:
+        ext_options = sorted(ext_nodes_all.keys())
+        _ext_labels = {c: cidr_label(c) for c in ext_options}
+        selected_ext_list = st.sidebar.multiselect(
+            "External IP blocks",
+            options=ext_options,
+            default=ext_options,
+            format_func=lambda c: _ext_labels[c],
+            help="Filter which external IP blocks appear in the diagram.",
+        )
+        selected_ext = set(selected_ext_list)
+
+    # ── Apply external IP filter ──────────────────────────────────────────────
+    if selected_ext is not None:
+        external_nodes = {c: e for c, e in ext_nodes_all.items() if c in selected_ext}
+        kept_eids = set(external_nodes.values())
+        edges = {
+            (src, dst): v for (src, dst), v in edges_all.items()
+            if not (src.startswith("ext_") and src not in kept_eids)
+            and not (dst.startswith("ext_") and dst not in kept_eids)
+        }
+    else:
+        edges = edges_all
+        external_nodes = ext_nodes_all
+
     # ── Route reachability ────────────────────────────────────────────────────
     route_results = check_route_reachability(
         [r for r in all_routes if r["namespace"] in active_ns],
@@ -180,14 +217,16 @@ def main() -> None:
         ns_labels,
     )
 
-    # ── Compute ───────────────────────────────────────────────────────────────
-    dot, edges, external_nodes = cluster_map_dot(
-        visible_policies, filtered_pods, ns_labels, active_ns, show_external,
-        anps=anps, route_results=route_results, show_anps=show_anps,
+    # ── Render DOT ────────────────────────────────────────────────────────────
+    all_external = {**external_nodes, **anp_ext_pre}
+    dot = build_dot(
+        workloads, ns_labels, edges, all_external, active_ns,
+        anp_edges=anp_edges_pre or None,
+        route_results=route_results,
     )
-    workloads = build_workloads(filtered_pods)
     active_policies = [
-        p for p in visible_policies if p.get("metadata", {}).get("namespace") in active_ns
+        p for p in visible_policies
+        if p.get("metadata", {}).get("namespace") in active_ns
     ]
 
     # ── Metrics ───────────────────────────────────────────────────────────────
@@ -222,7 +261,6 @@ def main() -> None:
         else:
             rows = []
             for (src, dst), annotations in sorted(edges.items()):
-                ports_set = sorted({pl for pl, _ in annotations})
                 policy_names = sorted({pn for _, pn in annotations})
                 src_w = workloads.get(src, {})
                 dst_w = workloads.get(dst, {})
@@ -231,7 +269,7 @@ def main() -> None:
                     "From namespace": src_w.get("namespace", src),
                     "To workload": dst_w.get("app", dst) if dst in workloads else dst,
                     "To namespace": dst_w.get("namespace", "") if dst in workloads else "external",
-                    "Ports": " / ".join(ports_set),
+                    "Ports": merge_edge_ports(annotations),
                     "Policy": ", ".join(policy_names),
                 })
             st.dataframe(rows, use_container_width=True, hide_index=True)
