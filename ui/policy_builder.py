@@ -50,7 +50,7 @@ from k8s.exporter_client import (
     snapshot_routes_in_ns,
     snapshot_policies,
 )
-from ui.netpol_viz import policy_preview_dot
+from ui.netpol_viz import policy_preview_dot, format_ports
 
 # ── Label index helpers ───────────────────────────────────────────────────────
 
@@ -133,18 +133,51 @@ def _build_peer(rule: dict) -> dict:
     return peer
 
 
+def _parse_port_spec(spec: str, protocol: str) -> tuple[list[dict], str | None]:
+    """Parse a comma-separated port spec into individual port dicts.
+
+    '443,5090-5095,9111' → [{"protocol":"TCP","port":443}, {"protocol":"TCP","port":5090}, ...]
+    Ranges are expanded to individual entries (no endPort).
+    Returns (entries, error_message).
+    """
+    entries: list[dict] = []
+    for token in (t.strip() for t in spec.split(",") if t.strip()):
+        if "-" in token:
+            parts = token.split("-", 1)
+            try:
+                start, end = int(parts[0].strip()), int(parts[1].strip())
+            except ValueError:
+                return [], f"Invalid range '{token}': both sides must be integers."
+            if start > end:
+                start, end = end, start
+            if end - start >= 1000:
+                return [], (
+                    f"Range '{token}' spans {end - start + 1} ports. "
+                    "Use a range of at most 1000 ports."
+                )
+            for port in range(start, end + 1):
+                entries.append({"protocol": protocol, "port": port})
+        else:
+            try:
+                entries.append({"protocol": protocol, "port": int(token)})
+            except ValueError:
+                return [], f"Invalid port '{token}': must be an integer."
+    return entries, None
+
+
 def _build_port_entries(ports: list[dict]) -> list[dict]:
+    seen: set[tuple] = set()
     result = []
     for p in ports:
-        entry: dict = {"protocol": p.get("protocol", "TCP")}
-        if p.get("port") is not None and p.get("port") != "":
-            try:
-                entry["port"] = int(p["port"])
-                if p.get("endPort") is not None and p.get("endPort") != "":
-                    entry["endPort"] = int(p["endPort"])
-            except (ValueError, TypeError):
-                entry["port"] = p["port"]  # named port
-        result.append(entry)
+        proto = p.get("protocol", "TCP")
+        port = p.get("port")
+        if port is None:
+            continue
+        key = (proto, port)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({"protocol": proto, "port": int(port)})
     return result
 
 
@@ -253,19 +286,7 @@ def _ports_summary(ports: list[dict] | None) -> str:
     """Return a concise ports/protocol summary."""
     if not ports:
         return "all ports/protocols"
-
-    items: list[str] = []
-    for p in ports:
-        proto = p.get("protocol", "TCP")
-        port = p.get("port")
-        end_port = p.get("endPort")
-        if port and end_port:
-            items.append(f"{proto}:{port}-{end_port}")
-        elif port:
-            items.append(f"{proto}:{port}")
-        else:
-            items.append(str(proto))
-    return ", ".join(items)
+    return format_ports(ports)
 
 
 def _selector_conditions(selector: dict | None) -> str:
@@ -761,33 +782,41 @@ def _render_rule_editor(
 
     st.markdown("**Ports** *(leave empty to allow all ports)*")
 
-    port_col1, port_col2, port_col3, port_col4 = st.columns([2, 2, 2, 1])
-    new_protocol = port_col1.selectbox(
+    port_proto_col, port_spec_col, port_add_col = st.columns([2, 5, 1])
+    new_protocol = port_proto_col.selectbox(
         "Protocol", _PROTOCOLS, key=f"{rules_key}_{rule_idx}_proto"
     )
-    new_port = port_col2.text_input(
-        "Port / Start", key=f"{rules_key}_{rule_idx}_port_input",
-        placeholder="e.g. 80 or http",
+    new_port_spec = port_spec_col.text_input(
+        "Ports (comma-separated)",
+        key=f"{rules_key}_{rule_idx}_port_spec",
+        placeholder="e.g. 443,5090-5095,9111,9222",
     )
-    new_end_port = port_col3.text_input(
-        "End port (range)", key=f"{rules_key}_{rule_idx}_end_port_input",
-        placeholder="optional",
-    )
-    if port_col4.button("＋ Add", key=f"{rules_key}_{rule_idx}_add_port"):
-        if new_port:
-            entry: dict = {"protocol": new_protocol, "port": new_port}
-            if new_end_port.strip():
-                entry["endPort"] = new_end_port.strip()
-            rule["ports"].append(entry)
+    _port_err_key = f"{rules_key}_{rule_idx}_port_err"
+    if port_add_col.button("＋ Add", key=f"{rules_key}_{rule_idx}_add_port"):
+        raw_spec = new_port_spec.strip()
+        if raw_spec:
+            new_entries, err = _parse_port_spec(raw_spec, new_protocol)
+            if err:
+                st.session_state[_port_err_key] = err
+            else:
+                rule["ports"].extend(new_entries)
+                st.session_state.pop(_port_err_key, None)
+
+    if _port_err_key in st.session_state:
+        st.error(st.session_state[_port_err_key])
 
     if rule["ports"]:
-        for pidx, p in enumerate(rule["ports"]):
+        # Group by protocol, show compact range label, delete per group
+        by_proto: dict[str, list[dict]] = {}
+        for p in rule["ports"]:
+            by_proto.setdefault(p.get("protocol", "TCP"), []).append(p)
+        for proto in sorted(by_proto):
+            compact = format_ports(by_proto[proto])
             p_col, del_col = st.columns([5, 1])
-            end = p.get("endPort")
-            label = f"{p['protocol']}:{p['port']}-{end}" if end else f"{p['protocol']}:{p['port']}"
-            p_col.code(label, language=None)
-            if del_col.button("✕", key=f"{rules_key}_{rule_idx}_del_port_{pidx}"):
-                rule["ports"].pop(pidx)
+            p_col.code(compact, language=None)
+            if del_col.button("✕", key=f"{rules_key}_{rule_idx}_del_proto_{proto}",
+                              help=f"Remove all {proto} ports"):
+                rule["ports"] = [p for p in rule["ports"] if p.get("protocol", "TCP") != proto]
                 st.rerun()
 
 
