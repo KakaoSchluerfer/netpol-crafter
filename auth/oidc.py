@@ -12,9 +12,10 @@ CSRF protection: a random `state` token is stored in session and validated on ca
 TLS: pass OCP_CA_CERT_PATH to use a custom CA bundle instead of system CAs.
      Never set verify=False — that removes TLS protection entirely.
 """
+import hashlib
 import hmac
 import logging
-import secrets
+import time
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -60,8 +61,17 @@ class OIDCAuthenticator:
     # ── Auth URL ──────────────────────────────────────────────────────────────
 
     def generate_auth_url(self) -> tuple[str, str]:
-        """Return (authorization_url, state). Store state in session before redirecting."""
-        state = secrets.token_urlsafe(32)
+        """
+        Return (authorization_url, state).
+
+        The state is a stateless HMAC token: `<timestamp>.<mac>`. It can be
+        verified from the app secret alone — no server-side session storage
+        needed, so it survives the Streamlit WebSocket reconnect that happens
+        when OCP redirects the browser back after login.
+        """
+        ts = str(int(time.time()))
+        mac = hmac.new(self._app_secret, ts.encode(), hashlib.sha256).hexdigest()[:24]
+        state = f"{ts}.{mac}"
         params = urlencode({
             "response_type": "code",
             "client_id": self._client_id,
@@ -72,16 +82,27 @@ class OIDCAuthenticator:
         logger.debug("Generated auth URL for client_id=%s", self._client_id)
         return url, state
 
+    def _verify_state(self, state: str) -> bool:
+        """Verify an HMAC state token. Valid for 10 minutes."""
+        try:
+            ts_str, mac = state.rsplit(".", 1)
+            expected = hmac.new(self._app_secret, ts_str.encode(), hashlib.sha256).hexdigest()[:24]
+            if not hmac.compare_digest(mac, expected):
+                return False
+            return abs(time.time() - int(ts_str)) < 600
+        except Exception:
+            return False
+
     # ── Token exchange ────────────────────────────────────────────────────────
 
-    def exchange_code(self, code: str, state: str, expected_state: str) -> dict:
+    def exchange_code(self, code: str, state: str) -> dict:
         """
         Exchange an authorization code for tokens.
-        Raises ValueError on CSRF state mismatch.
+        Raises ValueError on invalid/expired CSRF state.
         Raises requests.HTTPError on token endpoint failure.
         """
-        if not hmac.compare_digest(state, expected_state):
-            raise ValueError("OAuth state mismatch — possible CSRF attempt. Login aborted.")
+        if not self._verify_state(state):
+            raise ValueError("Invalid or expired OAuth state — possible CSRF attempt. Login aborted.")
 
         logger.debug("Posting to token endpoint: %s", self.token_endpoint)
         resp = requests.post(

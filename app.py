@@ -66,15 +66,13 @@ def main() -> None:
     if "code" in params and "state" in params and not st.session_state.get("authenticated"):
         code: str = params["code"]
         returned_state: str = params["state"]
-        expected_state: str = st.session_state.get("oauth_state", "")
         try:
             logger.info("Exchanging OAuth authorization code")
-            token = authenticator.exchange_code(code, returned_state, expected_state)
+            token = authenticator.exchange_code(code, returned_state)
             user_info = authenticator.get_user_info(token["access_token"])
         except ValueError as exc:
-            logger.warning("OAuth state mismatch: %s", exc)
+            logger.warning("OAuth state validation failed: %s", exc)
             st.error(f"🚫 {exc}")
-            st.session_state.pop("oauth_state", None)
             st.stop()
         except Exception as exc:
             logger.error("Authentication failed: %s", exc, exc_info=True)
@@ -93,7 +91,6 @@ def main() -> None:
             },
             "access_token": token["access_token"],
         })
-        st.session_state.pop("oauth_state", None)
         logger.info("Authenticated: %s", user_info.get("preferred_username"))
         st.query_params.clear()
         st.rerun()
