@@ -2,7 +2,7 @@
 Network Policy Map — visual connection diagram.
 
 Shows which workloads can communicate based on active NetworkPolicies.
-Only reachable via st.navigation() after authentication (enforced in app.py).
+Data is served from the exporter's cached snapshot — no direct K8s calls here.
 Note: st.set_page_config() must NOT be called here; it lives in app.py.
 """
 from __future__ import annotations
@@ -13,17 +13,16 @@ import yaml
 import streamlit as st
 
 from config import get_config
-from k8s import (
-    list_network_policies,
-    list_all_pods,
-    get_all_namespace_labels,
-    list_namespaces,
-    list_admin_network_policies,
-    list_baseline_admin_network_policy,
-    list_all_routes,
-    list_all_services,
+from k8s.exporter_client import (
+    fetch_snapshot,
+    snapshot_namespaces,
+    snapshot_ns_labels,
+    snapshot_all_pods,
+    snapshot_all_routes,
+    snapshot_all_services,
+    snapshot_policies,
+    snapshot_anps,
 )
-from k8s.client import build_user_token_client
 from ui.netpol_viz import ns_palette, build_workloads, cluster_map_dot, check_route_reachability, route_diagram_dot
 
 logger = logging.getLogger(__name__)
@@ -43,24 +42,26 @@ def main() -> None:
     st.title(f"🗺 Network Policy Map — {config.cluster_name}")
     st.caption(
         "Directed graph of allowed pod-to-pod traffic derived from active "
-        "NetworkPolicies. Workloads are resolved to their labels."
+        "NetworkPolicies. Data is served from the exporter cache."
     )
 
-    # Build user-token ApiClient
-    access_token = st.session_state.get("access_token", "")
-    client = build_user_token_client(access_token, config) if access_token else None
-
     with st.spinner("Loading cluster data…"):
-        logger.info("Fetching cluster snapshot for map")
-        all_namespaces = list_namespaces(client)
-        all_pods = list_all_pods(client)
-        ns_labels = get_all_namespace_labels(client)
-        policies = list_network_policies(client)
-        anps = list_admin_network_policies(client)
-        all_routes = list_all_routes(client)
-        all_services = list_all_services(client)
-        logger.debug("Loaded %d namespaces, %d pods, %d policies, %d ANPs",
-                     len(all_namespaces), len(all_pods), len(policies), len(anps))
+        try:
+            snapshot = fetch_snapshot(config.exporter_url)
+        except Exception as exc:
+            st.error(f"Could not load cluster data: {exc}")
+            st.stop()
+
+    all_namespaces = snapshot_namespaces(snapshot)
+    all_pods       = snapshot_all_pods(snapshot)
+    ns_labels      = snapshot_ns_labels(snapshot)
+    policies       = snapshot_policies(snapshot)
+    anps           = snapshot_anps(snapshot)
+    all_routes     = snapshot_all_routes(snapshot)
+    all_services   = snapshot_all_services(snapshot)
+
+    logger.debug("Snapshot: %d namespaces, %d pods, %d policies, %d ANPs",
+                 len(all_namespaces), len(all_pods), len(policies), len(anps))
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     st.sidebar.header("Cluster")
@@ -121,7 +122,8 @@ def main() -> None:
     c3.metric("NetworkPolicies", len(active_policies))
     c4.metric("Allowed flows", len(edges))
     c5.metric("Routes reachable", n_reachable)
-    c6.metric("Routes blocked", n_blocked, delta=None if n_blocked == 0 else f"-{n_blocked}", delta_color="inverse")
+    c6.metric("Routes blocked", n_blocked,
+              delta=None if n_blocked == 0 else f"-{n_blocked}", delta_color="inverse")
     st.divider()
 
     if not workloads:
@@ -135,7 +137,7 @@ def main() -> None:
     with tab_graph:
         if not edges and not external_nodes:
             st.info("No allowed flows found. Either no NetworkPolicies are configured, or all traffic is denied.")
-        st.graphviz_chart(dot, width="stretch")
+        st.graphviz_chart(dot, use_container_width=True)
 
     with tab_flows:
         if not edges:
@@ -155,7 +157,7 @@ def main() -> None:
                     "Ports": " / ".join(ports_set),
                     "Policy": ", ".join(policy_names),
                 })
-            st.dataframe(rows, width="stretch", hide_index=True)
+            st.dataframe(rows, use_container_width=True, hide_index=True)
 
     with tab_routes:
         if not route_results:
@@ -163,8 +165,6 @@ def main() -> None:
         else:
             blocked = [r for r in route_results if not r["reachable"]]
             reachable = [r for r in route_results if r["reachable"]]
-
-            # Summary banner
             col_ok, col_bl = st.columns(2)
             with col_ok:
                 st.success(f"**{len(reachable)} reachable** — router ingress allowed")
@@ -175,22 +175,13 @@ def main() -> None:
                     st.success("**0 blocked**")
 
             st.markdown("#### Route flow diagram")
-            st.caption(
-                "Green = router can reach the backend pod · "
-                "Red dashed = blocked by NetworkPolicy · "
-                "Tip: use `matchLabels: policy-group.network.openshift.io/ingress: \"\"` "
-                "as the `namespaceSelector` in your ingress rule to allow the OCP router."
-            )
-            rdot = route_diagram_dot(
-                route_results, workloads, selected_ns
-            )
+            rdot = route_diagram_dot(route_results, workloads, selected_ns)
             if rdot:
                 st.graphviz_chart(rdot, use_container_width=True)
 
             st.markdown("#### Details")
-            rows = []
-            for r in sorted(route_results, key=lambda x: (x["namespace"], x["route_name"])):
-                rows.append({
+            rows = [
+                {
                     "Status": "✅ Reachable" if r["reachable"] else "🚫 Blocked",
                     "TLS": "🔒" if r.get("tls") else "",
                     "Route": r["route_name"],
@@ -198,7 +189,9 @@ def main() -> None:
                     "Host": r["host"],
                     "Target Service": r["target_svc"],
                     "Reason": r["reason"],
-                })
+                }
+                for r in sorted(route_results, key=lambda x: (x["namespace"], x["route_name"]))
+            ]
             st.dataframe(rows, hide_index=True, use_container_width=True)
 
     with tab_policies:

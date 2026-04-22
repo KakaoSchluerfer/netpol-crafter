@@ -762,49 +762,29 @@ def policy_preview_dot(
     workloads = build_workloads(all_pods)
     visible_ns = set(ns_labels.keys()) | {w["namespace"] for w in workloads.values()}
 
+    pol_ns = policy_dict.get("metadata", {}).get("namespace", "")
+    spec = policy_dict.get("spec", {})
+
     edges, external_nodes = collect_edges(
         [policy_dict], workloads, ns_labels, visible_ns, show_external
     )
 
-    # Collect relevant namespaces:
-    #   1. The policy's own namespace (always shown)
-    #   2. Any namespace that matches a namespaceSelector in the rules
-    #   3. Any namespace that appears in an edge (sources / destinations)
-    pol_ns = policy_dict.get("metadata", {}).get("namespace", "")
-    relevant_ns: set[str] = {pol_ns} if pol_ns else set()
-
-    spec = policy_dict.get("spec", {})
-    for direction, peer_key in (("ingress", "from"), ("egress", "to")):
-        for rule in spec.get(direction, []):
-            for peer in rule.get(peer_key, []):
-                ns_sel = peer.get("namespaceSelector")
-                if ns_sel is not None:
-                    for ns in visible_ns:
-                        ns_lbls = ns_labels.get(ns, {"kubernetes.io/metadata.name": ns})
-                        if selector_matches(ns_lbls, ns_sel):
-                            relevant_ns.add(ns)
-                elif peer.get("podSelector") is not None and not peer.get("ipBlock"):
-                    # podSelector-only → targets the policy's own namespace
-                    relevant_ns.add(pol_ns)
-
-    for src, dst in edges:
-        if src in workloads:
-            relevant_ns.add(workloads[src]["namespace"])
-        if dst in workloads:
-            relevant_ns.add(workloads[dst]["namespace"])
-
-    # Filter workloads to only those in relevant namespaces
-    filtered_workloads = {
-        k: v for k, v in workloads.items() if v["namespace"] in relevant_ns
+    # Only include workloads that are actual edge endpoints (matched by a selector),
+    # plus the policy's own pod targets so isolated pods remain visible.
+    involved: set[str] = {
+        key for pair in edges for key in pair if key in workloads
     }
+    if pol_ns:
+        involved.update(find_peers(
+            workloads, ns_labels, visible_ns,
+            restrict_ns=pol_ns, ns_selector=None,
+            pod_selector=spec.get("podSelector"),
+        ))
 
-    dot = build_dot(
-        filtered_workloads,
-        ns_labels,
-        edges,
-        external_nodes,
-        sorted(relevant_ns),
-    )
+    filtered_workloads = {k: v for k, v in workloads.items() if k in involved}
+    selected_ns = sorted({w["namespace"] for w in filtered_workloads.values()})
+
+    dot = build_dot(filtered_workloads, ns_labels, edges, external_nodes, selected_ns)
     return dot, len(edges)
 
 
