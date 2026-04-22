@@ -499,17 +499,11 @@ def build_dot(
         if ns not in by_ns:
             continue
         border, bg, node_fill = ns_palette(ns)
-        ns_lbls = ns_labels.get(ns, {})
-        ns_meta = " · ".join(
-            f"{k}={_esc(v)}"
-            for k, v in ns_lbls.items()
-            if k != "kubernetes.io/metadata.name"
-        )
         safe_cluster = ns.replace("-", "_")
 
         lines += [
             f"  subgraph cluster_{safe_cluster} {{",
-            f'    label=<<B>{_esc(ns)}</B><BR/><FONT POINT-SIZE="8" COLOR="{border}">{_esc(ns_meta)}</FONT>>',
+            f'    label=<<B>{_esc(ns)}</B>>',
             f'    style=filled',
             f'    color="{border}"',
             f'    fillcolor="{bg}"',
