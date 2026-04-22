@@ -103,6 +103,16 @@ def main() -> None:
         help="Overlay ANP edges (purple=Allow, red=Deny) on the cluster map.",
     )
 
+    st.sidebar.markdown("**Default NetworkPolicies**")
+    _DEFAULT_POLICY_NAMES = [
+        "allow-all-within-namespace",
+        "default-deny-all-ingress-and-egress",
+    ]
+    show_default_policies = {
+        name: st.sidebar.checkbox(name, value=False, key=f"defpol_{name}")
+        for name in _DEFAULT_POLICY_NAMES
+    }
+
     # Only include namespaces where the user picked at least one workload
     active_ns = [ns for ns in selected_ns if ns_selected_apps.get(ns)]
 
@@ -135,23 +145,30 @@ def main() -> None:
         and _app_of(p) in ns_selected_apps[p["namespace"]]
     ]
 
+    # Apply default-policy filter once so all downstream code uses the same list
+    visible_policies = [
+        p for p in policies
+        if p.get("metadata", {}).get("name") not in _DEFAULT_POLICY_NAMES
+        or show_default_policies.get(p.get("metadata", {}).get("name"), False)
+    ]
+
     # ── Route reachability ────────────────────────────────────────────────────
     route_results = check_route_reachability(
         [r for r in all_routes if r["namespace"] in active_ns],
         [s for s in all_services if s["namespace"] in active_ns],
         filtered_pods,
-        [p for p in policies if p.get("metadata", {}).get("namespace") in active_ns],
+        [p for p in visible_policies if p.get("metadata", {}).get("namespace") in active_ns],
         ns_labels,
     )
 
     # ── Compute ───────────────────────────────────────────────────────────────
     dot, edges, external_nodes = cluster_map_dot(
-        policies, filtered_pods, ns_labels, active_ns, show_external,
+        visible_policies, filtered_pods, ns_labels, active_ns, show_external,
         anps=anps, route_results=route_results, show_anps=show_anps,
     )
     workloads = build_workloads(filtered_pods)
     active_policies = [
-        p for p in policies if p.get("metadata", {}).get("namespace") in active_ns
+        p for p in visible_policies if p.get("metadata", {}).get("namespace") in active_ns
     ]
 
     # ── Metrics ───────────────────────────────────────────────────────────────
