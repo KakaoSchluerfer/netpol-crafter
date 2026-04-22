@@ -30,7 +30,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 CACHE_TTL = int(os.getenv("CACHE_TTL", "60"))
-CACHE_DIR = Path.cwd() / "cache"
+# Absolute path anchored to this file: /app/exporter/main.py → /app/cache
+# Override with CACHE_DIR env var if needed.
+CACHE_DIR = Path(os.getenv("CACHE_DIR", str(Path(__file__).resolve().parent.parent / "cache")))
 CACHE_FILE = CACHE_DIR / "snapshot.json"
 
 _cache: dict = {"snapshot": None, "ts": 0.0, "refreshing": False}
@@ -53,9 +55,9 @@ def _save_to_disk(snapshot: ClusterSnapshot) -> None:
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         CACHE_FILE.write_text(snapshot.model_dump_json())
-        logger.debug("Snapshot saved to %s", CACHE_FILE)
+        logger.info("Snapshot written to disk: %s", CACHE_FILE)
     except Exception:
-        logger.warning("Failed to save snapshot to disk", exc_info=True)
+        logger.error("Failed to write snapshot to disk: %s", CACHE_FILE, exc_info=True)
 
 
 # ── Background refresh ────────────────────────────────────────────────────────
@@ -83,6 +85,7 @@ async def _refresh_cache() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("Cache directory: %s", CACHE_DIR)
     disk_snapshot = _load_from_disk()
     if disk_snapshot is not None:
         _cache["snapshot"] = disk_snapshot
