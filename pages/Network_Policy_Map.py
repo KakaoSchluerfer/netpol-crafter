@@ -63,12 +63,25 @@ def main() -> None:
     logger.debug("Snapshot: %d namespaces, %d pods, %d policies, %d ANPs",
                  len(all_namespaces), len(all_pods), len(policies), len(anps))
 
-    # Build workload-name index once: {namespace: [app, ...]}
+    _DEFAULT_POLICY_NAMES = frozenset({
+        "allow-all-within-namespace",
+        "default-deny-all-ingress-and-egress",
+    })
+
+    # Build lookup indexes once
     _all_workloads = build_workloads(all_pods)
     ns_to_apps: dict[str, list[str]] = {}
     for w in _all_workloads.values():
         ns_to_apps.setdefault(w["namespace"], set()).add(w["app"])
     ns_to_apps = {ns: sorted(apps) for ns, apps in ns_to_apps.items()}
+
+    ns_to_policies: dict[str, list[str]] = {}
+    for p in policies:
+        ns = p.get("metadata", {}).get("namespace", "")
+        name = p.get("metadata", {}).get("name", "")
+        if ns and name:
+            ns_to_policies.setdefault(ns, []).append(name)
+    ns_to_policies = {ns: sorted(names) for ns, names in ns_to_policies.items()}
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     st.sidebar.header("Cluster")
@@ -78,23 +91,37 @@ def main() -> None:
     st.sidebar.header("Filters")
     selected_ns = st.sidebar.multiselect(
         "Namespaces", options=all_namespaces, default=[],
-        help="Select one or more namespaces, then pick workloads within each.",
+        help="Select namespaces, then choose workloads and policies within each.",
     )
 
-    # Per-namespace workload filter — shown immediately below the namespace picker
+    # Per-namespace workload + policy selectors
     ns_selected_apps: dict[str, list[str]] = {}
-    if selected_ns:
-        st.sidebar.markdown("**Workloads**")
-        for ns in selected_ns:
-            apps = ns_to_apps.get(ns, [])
-            ns_selected_apps[ns] = st.sidebar.multiselect(
-                ns,
-                options=apps,
-                default=[],
-                key=f"wl_{ns}",
-                placeholder="Select workloads…" if apps else "No workloads found",
-                disabled=not apps,
-            )
+    ns_selected_policies: dict[str, set[str]] = {}
+
+    for ns in selected_ns:
+        st.sidebar.markdown(f"**{ns}**")
+
+        apps = ns_to_apps.get(ns, [])
+        ns_selected_apps[ns] = st.sidebar.multiselect(
+            "Workloads",
+            options=apps,
+            default=[],
+            key=f"wl_{ns}",
+            placeholder="Select workloads…" if apps else "No workloads found",
+            disabled=not apps,
+        )
+
+        pol_names = ns_to_policies.get(ns, [])
+        # Default policies are hidden by default; all others pre-selected
+        default_pol_selection = [n for n in pol_names if n not in _DEFAULT_POLICY_NAMES]
+        ns_selected_policies[ns] = set(st.sidebar.multiselect(
+            "Network Policies",
+            options=pol_names,
+            default=default_pol_selection,
+            key=f"pol_{ns}",
+            placeholder="Select policies…" if pol_names else "No policies found",
+            disabled=not pol_names,
+        ))
 
     show_external = st.sidebar.checkbox("Show external IP blocks", value=True)
     show_anps = st.sidebar.checkbox(
@@ -102,16 +129,6 @@ def main() -> None:
         value=False,
         help="Overlay ANP edges (purple=Allow, red=Deny) on the cluster map.",
     )
-
-    st.sidebar.markdown("**Default NetworkPolicies**")
-    _DEFAULT_POLICY_NAMES = [
-        "allow-all-within-namespace",
-        "default-deny-all-ingress-and-egress",
-    ]
-    show_default_policies = {
-        name: st.sidebar.checkbox(name, value=False, key=f"defpol_{name}")
-        for name in _DEFAULT_POLICY_NAMES
-    }
 
     # Only include namespaces where the user picked at least one workload
     active_ns = [ns for ns in selected_ns if ns_selected_apps.get(ns)]
@@ -145,11 +162,13 @@ def main() -> None:
         and _app_of(p) in ns_selected_apps[p["namespace"]]
     ]
 
-    # Apply default-policy filter once so all downstream code uses the same list
+    # Only pass policies the user explicitly selected — this is the sole source of
+    # truth for which flows are visible in the diagram and the flows table.
     visible_policies = [
         p for p in policies
-        if p.get("metadata", {}).get("name") not in _DEFAULT_POLICY_NAMES
-        or show_default_policies.get(p.get("metadata", {}).get("name"), False)
+        if p.get("metadata", {}).get("name") in ns_selected_policies.get(
+            p.get("metadata", {}).get("namespace", ""), set()
+        )
     ]
 
     # ── Route reachability ────────────────────────────────────────────────────
