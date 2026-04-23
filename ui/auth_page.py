@@ -37,13 +37,15 @@ def render_login_page(authenticator: OIDCAuthenticator) -> None:
         # st.link_button renders a real <a href> — no JavaScript iframe tricks.
         # This is important because window.top.location.href in an iframe is
         # blocked by browser security policies in many environments.
-        st.link_button(
-            "Sign in with OpenShift",
-            auth_url,
-            use_container_width=True,
-            type="primary",
-            help="Redirects to OpenShift OAuth for authentication",
-        )
+        _, btn_col, _ = st.columns([1, 2, 1])
+        with btn_col:
+            st.link_button(
+                "Sign in with OpenShift",
+                auth_url,
+                use_container_width=True,
+                type="primary",
+                help="Redirects to OpenShift OAuth for authentication",
+            )
 
         st.markdown(
             "<p style='text-align:center; color:grey; font-size:0.8em;'>"

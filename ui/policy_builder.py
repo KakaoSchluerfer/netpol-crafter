@@ -864,11 +864,7 @@ def render_policy_builder(config: AppConfig) -> None:
         )
 
     # ── Page header ───────────────────────────────────────────────────────────
-    _hc1, _hc2 = st.columns([1, 15])
-    with _hc1:
-        st.image("sources/images/pharos.png", width=48)
-    with _hc2:
-        st.title("Pharos")
+    st.title("Pharos")
     st.markdown(
         "Build an OpenShift **NetworkPolicy** from cluster resources. "
         "The tool fetches live labels so your selectors are always accurate."
