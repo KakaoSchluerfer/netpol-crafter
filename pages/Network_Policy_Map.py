@@ -359,6 +359,16 @@ def main() -> None:
                 if spec.get("egress") is not None:
                     st.markdown("**Egress rules**")
                     st.code(yaml.dump(spec["egress"], default_flow_style=False).strip(), language="yaml")
+                st.markdown("**Full YAML**")
+                st.code(
+                    yaml.dump({
+                        "apiVersion": "networking.k8s.io/v1",
+                        "kind": "NetworkPolicy",
+                        "metadata": {"name": name, "namespace": ns},
+                        "spec": spec,
+                    }, default_flow_style=False, sort_keys=False),
+                    language="yaml",
+                )
 
     with tab_issues:
         flagged = []
@@ -378,23 +388,36 @@ def main() -> None:
         else:
             st.warning(
                 f"**{len(flagged)} policy issue(s) detected.** "
-                "Flows from these rules are hidden in the diagram."
+                + ("Unrestricted rules produce no edges in the diagram."
+                   if not _too_many
+                   else "Review and fix these policies to improve visibility.")
             )
             for item in sorted(flagged, key=lambda x: (x["namespace"], x["name"])):
-                with st.expander(f"**{item['name']}** · `{item['namespace']}`"):
+                pol = item["policy"]
+                spec = pol.get("spec", {})
+                _ns = item["namespace"]
+                _name = item["name"]
+                with st.expander(f"**{_name}** · `{_ns}`"):
                     for issue in item["issues"]:
                         st.error(issue, icon="⚠️")
-                    spec = item["policy"].get("spec", {})
-                    if spec.get("policyTypes"):
-                        st.markdown(f"**policyTypes:** `{spec['policyTypes']}`")
                     if spec.get("ingress") is not None:
-                        st.markdown("**ingress rules:**")
+                        st.markdown("**Ingress rules**")
                         st.code(yaml.dump(spec["ingress"], default_flow_style=False).strip(),
                                 language="yaml")
                     if spec.get("egress") is not None:
-                        st.markdown("**egress rules:**")
+                        st.markdown("**Egress rules**")
                         st.code(yaml.dump(spec["egress"], default_flow_style=False).strip(),
                                 language="yaml")
+                    st.markdown("**Full YAML**")
+                    st.code(
+                        yaml.dump({
+                            "apiVersion": "networking.k8s.io/v1",
+                            "kind": "NetworkPolicy",
+                            "metadata": {"name": _name, "namespace": _ns},
+                            "spec": spec,
+                        }, default_flow_style=False, sort_keys=False),
+                        language="yaml",
+                    )
 
     with tab_dot:
         if _too_many:
