@@ -1,23 +1,23 @@
 ---
-# ServiceAccount used by the netpol-exporter pod to read cluster resources.
-# The netpol-crafter (Streamlit) pod itself uses the logged-in user's OAuth
+# ServiceAccount used by the pharos-exporter pod to read cluster resources.
+# The pharos-frontend (Streamlit) pod itself uses the logged-in user's OAuth
 # token and therefore needs no special RBAC.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: netpol-exporter
-  namespace: netpol-crafter
+  name: pharos-exporter
+  namespace: pharos-frontend
   labels:
-    app.kubernetes.io/name: netpol-exporter
+    app.kubernetes.io/name: pharos-exporter
 
 ---
 # ClusterRole: read-only access to everything the exporter needs to snapshot.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: netpol-exporter
+  name: pharos-exporter
   labels:
-    app.kubernetes.io/name: netpol-exporter
+    app.kubernetes.io/name: pharos-exporter
 rules:
   - apiGroups: [""]
     resources: ["namespaces", "pods", "services"]
@@ -41,14 +41,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: netpol-exporter
+  name: pharos-exporter
   labels:
-    app.kubernetes.io/name: netpol-exporter
+    app.kubernetes.io/name: pharos-exporter
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: netpol-exporter
+  name: pharos-exporter
 subjects:
   - kind: ServiceAccount
-    name: netpol-exporter
-    namespace: netpol-crafter
+    name: pharos-exporter
+    namespace: pharos-frontend

@@ -847,11 +847,6 @@ def render_policy_builder(config: AppConfig) -> None:
         st.markdown(f"### 🖥 Cluster: {config.cluster_name}")
         st.divider()
 
-        if st.button("🔄 Refresh cluster data", width="stretch"):
-            st.cache_data.clear()
-            st.success("Cache cleared – data will reload on next interaction.")
-
-        st.divider()
         if st.button("🚪 Sign out", width="stretch", type="secondary"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
@@ -869,7 +864,7 @@ def render_policy_builder(config: AppConfig) -> None:
         )
 
     # ── Page header ───────────────────────────────────────────────────────────
-    st.title("🔒 NetPol Crafter")
+    st.title("🔒 Pharos")
     st.markdown(
         "Build an OpenShift **NetworkPolicy** from cluster resources. "
         "The tool fetches live labels so your selectors are always accurate."
@@ -1080,8 +1075,6 @@ def render_policy_builder(config: AppConfig) -> None:
     yaml_str = _to_yaml(policy_dict)
 
     st.code(yaml_str, language="yaml")
-    st.markdown("### Policy explainer")
-    st.markdown(explain_policy_preview(policy_dict))
 
     st.markdown("### Connection diagram")
     _viz_dot, _viz_flows = policy_preview_dot(policy_dict, all_pods_global, all_ns_labels_map)
@@ -1093,6 +1086,9 @@ def render_policy_builder(config: AppConfig) -> None:
             icon="ℹ️",
         )
     st.graphviz_chart(_viz_dot, width="stretch")
+
+    st.markdown("### Policy explainer")
+    st.markdown(explain_policy_preview(policy_dict))
 
     dl_col, _, _ = st.columns([1, 1, 3])
     dl_col.download_button(

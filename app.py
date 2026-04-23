@@ -1,5 +1,5 @@
 """
-NetPol Crafter — application entry point.
+Pharos — application entry point.
 
 Auth flow:
   1. App loads → if ?code= callback, exchange for token and store in session
@@ -14,7 +14,7 @@ import streamlit as st
 
 # Must be the first Streamlit call in the script.
 st.set_page_config(
-    page_title="NetPol Crafter",
+    page_title="Pharos",
     page_icon="🔒",
     layout="wide",
     initial_sidebar_state="expanded",

@@ -1,5 +1,5 @@
 """
-In-cluster data fetcher for the netpol-exporter.
+In-cluster data fetcher for the pharos-exporter.
 
 Uses K8S_IN_CLUSTER env var (default "true") to decide incluster vs kubeconfig.
 """

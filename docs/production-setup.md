@@ -1,6 +1,6 @@
-# NetPol Crafter – Production Setup Guide
+# Pharos – Production Setup Guide
 
-This guide covers deploying NetPol Crafter on an OpenShift cluster using
+This guide covers deploying Pharos on an OpenShift cluster using
 OpenShift OAuth for authentication and a dedicated exporter ServiceAccount for
 cluster-wide read access.
 
@@ -13,7 +13,7 @@ cluster-wide read access.
   │  OpenShift Cluster  (one deployment per cluster)            │
   │                                                             │
   │  ┌────────────────────┐    HTTP :8080     ┌──────────────┐  │
-  │  │  netpol-crafter    │ ─────────────────►│  netpol-     │  │
+  │  │  pharos-frontend    │ ─────────────────►│  netpol-     │  │
   │  │  (Streamlit :8501) │                   │  exporter    │  │
   │  │                    │                   │  (FastAPI)   │  │
   │  │  • Policy builder  │                   │              │  │
@@ -31,17 +31,17 @@ cluster-wide read access.
 | Concern | Approach |
 |---------|----------|
 | Authentication | OpenShift OAuth (`authorization_code` flow) |
-| Policy builder data | `netpol-exporter` SA reads cluster-wide; served as JSON REST API |
+| Policy builder data | `pharos-exporter` SA reads cluster-wide; served as JSON REST API |
 | Network Policy Map | Logged-in user's OAuth token → shows only RBAC-permitted namespaces |
 | GitOps / apply | Out of scope — export the YAML and apply via your existing pipeline |
-| Multi-cluster | Deploy one `netpol-crafter` + one `netpol-exporter` per cluster |
+| Multi-cluster | Deploy one `pharos-frontend` + one `pharos-exporter` per cluster |
 
 ---
 
 ## 1. Namespace
 
 ```bash
-oc new-project netpol-crafter 2>/dev/null || oc project netpol-crafter
+oc new-project pharos-frontend 2>/dev/null || oc project pharos-frontend
 ```
 
 ---
@@ -58,10 +58,10 @@ oc apply -f deploy/rbac.yaml
 ```
 
 The file creates:
-- `netpol-exporter` ServiceAccount
-- `netpol-exporter` ClusterRole (read-only: namespaces, pods, services,
+- `pharos-exporter` ServiceAccount
+- `pharos-exporter` ClusterRole (read-only: namespaces, pods, services,
   routes, networkpolicies, adminnetworkpolicies, baselineadminnetworkpolicies)
-- `netpol-exporter` ClusterRoleBinding
+- `pharos-exporter` ClusterRoleBinding
 
 > **Note:** AdminNetworkPolicy / BaselineAdminNetworkPolicy are `policy.networking.k8s.io`
 > CRDs available on OpenShift 4.14+ with the ANP feature gate enabled.
@@ -78,10 +78,10 @@ cat <<EOF | oc apply -f -
 apiVersion: oauth.openshift.io/v1
 kind: OAuthClient
 metadata:
-  name: netpol-crafter
+  name: pharos-frontend
 secret: "$(openssl rand -base64 32 | tr -d '=+/' | head -c 40)"
 redirectURIs:
-  - https://netpol-crafter.apps.your-cluster.example.com
+  - https://pharos-frontend.apps.your-cluster.example.com
 grantMethod: auto
 EOF
 ```
@@ -90,7 +90,7 @@ Note the `secret` value — you'll need it as `OCP_CLIENT_SECRET`.
 
 To retrieve the current secret later:
 ```bash
-oc get oauthclient netpol-crafter -o jsonpath='{.secret}'
+oc get oauthclient pharos-frontend -o jsonpath='{.secret}'
 ```
 
 ---
@@ -101,12 +101,12 @@ oc get oauthclient netpol-crafter -o jsonpath='{.secret}'
 # Generate a strong random app key
 APP_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(64))")
 
-oc create secret generic netpol-crafter-env \
-  -n netpol-crafter \
-  --from-literal=OCP_CLIENT_ID=netpol-crafter \
+oc create secret generic pharos-frontend-env \
+  -n pharos-frontend \
+  --from-literal=OCP_CLIENT_ID=pharos-frontend \
   --from-literal=OCP_CLIENT_SECRET=<secret-from-step-3> \
   --from-literal=OCP_API_SERVER=https://api.your-cluster.example.com:6443 \
-  --from-literal=OCP_REDIRECT_URI=https://netpol-crafter.apps.your-cluster.example.com \
+  --from-literal=OCP_REDIRECT_URI=https://pharos-frontend.apps.your-cluster.example.com \
   --from-literal=APP_SECRET_KEY="$APP_KEY" \
   --from-literal=CLUSTER_NAME="Production (OCP 4.14)"
 ```
@@ -114,12 +114,12 @@ oc create secret generic netpol-crafter-env \
 If your cluster uses a custom CA:
 ```bash
 # Add the CA bundle as a separate secret
-oc create secret generic netpol-crafter-certs \
-  -n netpol-crafter \
+oc create secret generic pharos-frontend-certs \
+  -n pharos-frontend \
   --from-file=cluster-ca.crt=/path/to/cluster-ca.crt
 
 # Then set OCP_CA_CERT_PATH=/etc/netpol-certs/cluster-ca.crt in the env Secret
-# and mount netpol-crafter-certs at /etc/netpol-certs in the deployment
+# and mount pharos-frontend-certs at /etc/netpol-certs in the deployment
 ```
 
 ---
@@ -131,11 +131,11 @@ oc apply -f deploy/deployment.yaml
 ```
 
 This creates:
-- `netpol-crafter` Deployment (Streamlit app on port 8501)
-- `netpol-exporter` Deployment (FastAPI on port 8080, uses `netpol-exporter` SA)
-- `netpol-exporter` Service (ClusterIP, reachable by the crafter)
-- `netpol-crafter` Service
-- `netpol-crafter` Route (TLS edge termination)
+- `pharos-frontend` Deployment (Streamlit app on port 8501)
+- `pharos-exporter` Deployment (FastAPI on port 8080, uses `pharos-exporter` SA)
+- `pharos-exporter` Service (ClusterIP, reachable by the crafter)
+- `pharos-frontend` Service
+- `pharos-frontend` Route (TLS edge termination)
 
 ---
 
@@ -143,22 +143,22 @@ This creates:
 
 ```bash
 # Check pods are running
-oc get pods -n netpol-crafter
+oc get pods -n pharos-frontend
 
 # Exporter health
-oc exec -n netpol-crafter deploy/netpol-exporter -- \
+oc exec -n pharos-frontend deploy/pharos-exporter -- \
   curl -sf http://localhost:8080/health
 
 # Exporter snapshot (should return real cluster data)
-oc exec -n netpol-crafter deploy/netpol-exporter -- \
+oc exec -n pharos-frontend deploy/pharos-exporter -- \
   curl -s http://localhost:8080/snapshot | python3 -m json.tool | head -40
 
 # App health
-oc exec -n netpol-crafter deploy/netpol-crafter -- \
+oc exec -n pharos-frontend deploy/pharos-frontend -- \
   curl -sf http://localhost:8501/_stcore/health
 
 # Open the app
-oc get route netpol-crafter -n netpol-crafter -o jsonpath='{.spec.host}'
+oc get route pharos-frontend -n pharos-frontend -o jsonpath='{.spec.host}'
 ```
 
 ---
@@ -251,7 +251,7 @@ oc api-resources --api-group=policy.networking.k8s.io
 | TLS | Use edge/reencrypt termination on the Route; set `OCP_CA_CERT_PATH` for custom CAs |
 | Exporter SA | Minimum read-only RBAC; never add write verbs |
 | App secret key | Generate with `secrets.token_urlsafe(64)`; store in OCP Secret |
-| Network isolation | Create a `NetworkPolicy` in `netpol-crafter` namespace allowing only router ingress and exporter egress |
+| Network isolation | Create a `NetworkPolicy` in `pharos-frontend` namespace allowing only router ingress and exporter egress |
 | RBAC for users | OCP RBAC controls what namespaces each user sees in the Network Policy Map |
 | No write access | The app never applies NetworkPolicies; export the YAML and use your GitOps pipeline |
 

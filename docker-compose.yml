@@ -1,4 +1,4 @@
-# NetPol Crafter – Docker Compose
+# Pharos – Docker Compose
 #
 # ── Quick start (test mode, no credentials needed) ───────────────────────────
 #   docker compose up --build
@@ -15,8 +15,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: netpol-crafter:local
-    container_name: netpol-crafter
+    image: pharos-frontend:local
+    container_name: pharos-frontend
     command:
       - streamlit
       - run
@@ -51,8 +51,8 @@ services:
     restart: unless-stopped
 
   exporter:
-    image: netpol-crafter:local
-    container_name: netpol-exporter
+    image: pharos-frontend:local
+    container_name: pharos-exporter
     command:
       - uvicorn
       - exporter.main:app

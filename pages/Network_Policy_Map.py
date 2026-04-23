@@ -21,11 +21,10 @@ from k8s.exporter_client import (
     snapshot_all_routes,
     snapshot_all_services,
     snapshot_policies,
-    snapshot_anps,
 )
 from ui.netpol_viz import (
     ns_palette, build_workloads, compute_cluster_data, build_dot,
-    cluster_map_dot, check_route_reachability, route_diagram_dot,
+    check_route_reachability, route_diagram_dot,
     cidr_label, merge_edge_ports,
 )
 
@@ -60,12 +59,11 @@ def main() -> None:
     all_pods       = snapshot_all_pods(snapshot)
     ns_labels      = snapshot_ns_labels(snapshot)
     policies       = snapshot_policies(snapshot)
-    anps           = snapshot_anps(snapshot)
     all_routes     = snapshot_all_routes(snapshot)
     all_services   = snapshot_all_services(snapshot)
 
-    logger.debug("Snapshot: %d namespaces, %d pods, %d policies, %d ANPs",
-                 len(all_namespaces), len(all_pods), len(policies), len(anps))
+    logger.debug("Snapshot: %d namespaces, %d pods, %d policies",
+                 len(all_namespaces), len(all_pods), len(policies))
 
     _DEFAULT_POLICY_NAMES = frozenset({
         "allow-all-within-namespace",
@@ -87,6 +85,19 @@ def main() -> None:
             ns_to_policies.setdefault(ns, []).append(name)
     ns_to_policies = {ns: sorted(names) for ns, names in ns_to_policies.items()}
 
+    # External endpoints (ipBlock CIDRs) referenced by each namespace's policies
+    ns_to_ext_cidrs: dict[str, list[str]] = {}
+    for p in policies:
+        ns = p.get("metadata", {}).get("namespace", "")
+        spec = p.get("spec", {})
+        for rule in (spec.get("ingress") or []) + (spec.get("egress") or []):
+            for peer in (rule.get("from") or []) + (rule.get("to") or []):
+                ip_block = peer.get("ipBlock")
+                if ip_block:
+                    cidr = ip_block.get("cidr", "0.0.0.0/0")
+                    ns_to_ext_cidrs.setdefault(ns, set()).add(cidr)  # type: ignore[arg-type]
+    ns_to_ext_cidrs = {ns: sorted(cidrs) for ns, cidrs in ns_to_ext_cidrs.items()}
+
     # ── Sidebar ───────────────────────────────────────────────────────────────
     st.sidebar.header("Cluster")
     st.sidebar.markdown(f"**{config.cluster_name}**")
@@ -98,9 +109,10 @@ def main() -> None:
         help="Select namespaces, then choose workloads and policies within each.",
     )
 
-    # Per-namespace workload + policy selectors
+    # Per-namespace workload + policy + external endpoint selectors
     ns_selected_apps: dict[str, list[str]] = {}
     ns_selected_policies: dict[str, set[str]] = {}
+    ns_selected_ext: dict[str, set[str]] = {}
 
     for ns in selected_ns:
         st.sidebar.markdown(f"**{ns}**")
@@ -127,12 +139,19 @@ def main() -> None:
             disabled=not pol_names,
         ))
 
-    show_external = st.sidebar.checkbox("Show external IP blocks", value=True)
-    show_anps = st.sidebar.checkbox(
-        "Show AdminNetworkPolicies",
-        value=False,
-        help="Overlay ANP edges (purple=Allow, red=Deny) on the cluster map.",
-    )
+        ext_cidrs = ns_to_ext_cidrs.get(ns, [])
+        if ext_cidrs:
+            _ext_labels = {c: cidr_label(c) for c in ext_cidrs}
+            ns_selected_ext[ns] = set(st.sidebar.multiselect(
+                "External Endpoints",
+                options=ext_cidrs,
+                default=[],
+                format_func=lambda c, _lbl=_ext_labels: _lbl[c],
+                key=f"ext_{ns}",
+                placeholder="Select external endpoints…",
+            ))
+        else:
+            ns_selected_ext[ns] = set()
 
     # Only include namespaces where the user picked at least one workload
     active_ns = [ns for ns in selected_ns if ns_selected_apps.get(ns)]
@@ -175,38 +194,24 @@ def main() -> None:
         )
     ]
 
-    # ── Pre-compute cluster data (needed for external IP sidebar) ─────────────
-    workloads, edges_all, ext_nodes_all, anp_edges_pre, anp_ext_pre = compute_cluster_data(
-        visible_policies, filtered_pods, ns_labels, active_ns, show_external,
-        anps=anps, show_anps=show_anps,
+    # ── Aggregate selected external endpoints across all active namespaces ────
+    selected_ext: set[str] = set()
+    for ns in active_ns:
+        selected_ext.update(ns_selected_ext.get(ns, set()))
+
+    # ── Compute cluster data ──────────────────────────────────────────────────
+    workloads, edges_all, ext_nodes_all, _, _ = compute_cluster_data(
+        visible_policies, filtered_pods, ns_labels, active_ns, show_external=True,
     )
 
-    # ── Sidebar: External IP filter ───────────────────────────────────────────
-    selected_ext: set[str] | None = None
-    if show_external and ext_nodes_all:
-        ext_options = sorted(ext_nodes_all.keys())
-        _ext_labels = {c: cidr_label(c) for c in ext_options}
-        selected_ext_list = st.sidebar.multiselect(
-            "External IP blocks",
-            options=ext_options,
-            default=ext_options,
-            format_func=lambda c: _ext_labels[c],
-            help="Filter which external IP blocks appear in the diagram.",
-        )
-        selected_ext = set(selected_ext_list)
-
-    # ── Apply external IP filter ──────────────────────────────────────────────
-    if selected_ext is not None:
-        external_nodes = {c: e for c, e in ext_nodes_all.items() if c in selected_ext}
-        kept_eids = set(external_nodes.values())
-        edges = {
-            (src, dst): v for (src, dst), v in edges_all.items()
-            if not (src.startswith("ext_") and src not in kept_eids)
-            and not (dst.startswith("ext_") and dst not in kept_eids)
-        }
-    else:
-        edges = edges_all
-        external_nodes = ext_nodes_all
+    # ── Apply external endpoints filter ──────────────────────────────────────
+    external_nodes = {c: e for c, e in ext_nodes_all.items() if c in selected_ext}
+    kept_eids = set(external_nodes.values())
+    edges = {
+        (src, dst): v for (src, dst), v in edges_all.items()
+        if not (src.startswith("ext_") and src not in kept_eids)
+        and not (dst.startswith("ext_") and dst not in kept_eids)
+    }
 
     # ── Route reachability ────────────────────────────────────────────────────
     route_results = check_route_reachability(
@@ -218,10 +223,8 @@ def main() -> None:
     )
 
     # ── Render DOT ────────────────────────────────────────────────────────────
-    all_external = {**external_nodes, **anp_ext_pre}
     dot = build_dot(
-        workloads, ns_labels, edges, all_external, active_ns,
-        anp_edges=anp_edges_pre or None,
+        workloads, ns_labels, edges, external_nodes, active_ns,
         route_results=route_results,
     )
     active_policies = [

@@ -2,23 +2,23 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: netpol-crafter
+  name: pharos-frontend
   labels:
-    kubernetes.io/metadata.name: netpol-crafter
+    kubernetes.io/metadata.name: pharos-frontend
 
 ---
 # ── Non-sensitive configuration ───────────────────────────────────────────────
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: netpol-crafter-config
-  namespace: netpol-crafter
+  name: pharos-frontend-config
+  namespace: pharos-frontend
 data:
-  OCP_CLIENT_ID: "netpol-crafter"
+  OCP_CLIENT_ID: "pharos-frontend"
   OCP_API_SERVER: "https://api.your-cluster.example.com:6443"
-  OCP_REDIRECT_URI: "https://netpol-crafter.apps.your-cluster.example.com"
+  OCP_REDIRECT_URI: "https://pharos-frontend.apps.your-cluster.example.com"
   CLUSTER_NAME: "Production"
-  EXPORTER_URL: "http://netpol-exporter:8080"
+  EXPORTER_URL: "http://pharos-exporter:8080"
   K8S_IN_CLUSTER: "true"
   TEST_MODE: "false"
   # Uncomment when using a custom cluster CA (see Secret + volume below):
@@ -27,11 +27,11 @@ data:
 ---
 # ── Cluster CA bundle (optional) ──────────────────────────────────────────────
 # Create this Secret from your actual CA file:
-#   oc create secret generic netpol-crafter-ca \
-#     -n netpol-crafter \
+#   oc create secret generic pharos-frontend-ca \
+#     -n pharos-frontend \
 #     --from-file=cluster-ca.crt=/path/to/your/cluster-ca.crt
 #
-# Then uncomment the volume/volumeMount blocks in the netpol-crafter Deployment
+# Then uncomment the volume/volumeMount blocks in the pharos-frontend Deployment
 # and set OCP_CA_CERT_PATH in the ConfigMap above.
 #
 # DO NOT use verify=False — always use the CA bundle for production clusters.
@@ -39,8 +39,8 @@ data:
 # apiVersion: v1
 # kind: Secret
 # metadata:
-#   name: netpol-crafter-ca
-#   namespace: netpol-crafter
+#   name: pharos-frontend-ca
+#   namespace: pharos-frontend
 # type: Opaque
 # data:
 #   cluster-ca.crt: <base64-encoded PEM>
@@ -52,31 +52,31 @@ data:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: netpol-crafter-secrets
-  namespace: netpol-crafter
+  name: pharos-frontend-secrets
+  namespace: pharos-frontend
 type: Opaque
 stringData:
   OCP_CLIENT_SECRET: "REPLACE_ME"
   APP_SECRET_KEY: "REPLACE_ME"  # python3 -c "import secrets; print(secrets.token_urlsafe(64))"
 
 ---
-# ── netpol-crafter (Streamlit UI) ────────────────────────────────────────────
+# ── pharos-frontend (Streamlit UI) ────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: netpol-crafter
-  namespace: netpol-crafter
+  name: pharos-frontend
+  namespace: pharos-frontend
   labels:
-    app.kubernetes.io/name: netpol-crafter
+    app.kubernetes.io/name: pharos-frontend
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: netpol-crafter
+      app.kubernetes.io/name: pharos-frontend
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: netpol-crafter
+        app.kubernetes.io/name: pharos-frontend
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -85,7 +85,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: app
-          image: your-registry.example.com/netpol-crafter:latest
+          image: your-registry.example.com/pharos-frontend:latest
           command:
             - streamlit
             - run
@@ -100,9 +100,9 @@ spec:
               name: http
           envFrom:
             - configMapRef:
-                name: netpol-crafter-config
+                name: pharos-frontend-config
             - secretRef:
-                name: netpol-crafter-secrets
+                name: pharos-frontend-secrets
           resources:
             requests:
               cpu: 100m
@@ -122,7 +122,7 @@ spec:
               port: 8501
             initialDelaySeconds: 20
             periodSeconds: 30
-          # Uncomment to mount the cluster CA bundle (requires netpol-crafter-ca Secret):
+          # Uncomment to mount the cluster CA bundle (requires pharos-frontend-ca Secret):
           # volumeMounts:
           #   - name: cluster-ca
           #     mountPath: /etc/netpol-certs
@@ -136,17 +136,17 @@ spec:
       # volumes:
       #   - name: cluster-ca
       #     secret:
-      #       secretName: netpol-crafter-ca
+      #       secretName: pharos-frontend-ca
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: netpol-crafter
-  namespace: netpol-crafter
+  name: pharos-frontend
+  namespace: pharos-frontend
 spec:
   selector:
-    app.kubernetes.io/name: netpol-crafter
+    app.kubernetes.io/name: pharos-frontend
   ports:
     - port: 8501
       targetPort: 8501
@@ -157,15 +157,15 @@ spec:
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: netpol-crafter
-  namespace: netpol-crafter
+  name: pharos-frontend
+  namespace: pharos-frontend
   annotations:
     haproxy.router.openshift.io/timeout: 120s
 spec:
-  host: netpol-crafter.apps.your-cluster.example.com  # replace
+  host: pharos-frontend.apps.your-cluster.example.com  # replace
   to:
     kind: Service
-    name: netpol-crafter
+    name: pharos-frontend
   port:
     targetPort: http
   tls:
@@ -173,32 +173,32 @@ spec:
     insecureEdgeTerminationPolicy: Redirect
 
 ---
-# ── netpol-exporter (FastAPI) ─────────────────────────────────────────────────
+# ── pharos-exporter (FastAPI) ─────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: netpol-exporter
-  namespace: netpol-crafter
+  name: pharos-exporter
+  namespace: pharos-frontend
   labels:
-    app.kubernetes.io/name: netpol-exporter
+    app.kubernetes.io/name: pharos-exporter
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: netpol-exporter
+      app.kubernetes.io/name: pharos-exporter
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: netpol-exporter
+        app.kubernetes.io/name: pharos-exporter
     spec:
-      serviceAccountName: netpol-exporter
+      serviceAccountName: pharos-exporter
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
       containers:
         - name: exporter
-          image: your-registry.example.com/netpol-crafter:latest
+          image: your-registry.example.com/pharos-exporter:latest
           command:
             - uvicorn
             - exporter.main:app
@@ -209,7 +209,7 @@ spec:
               name: http
           envFrom:
             - configMapRef:
-                name: netpol-crafter-config
+                name: pharos-frontend-config
           resources:
             requests:
               cpu: 50m
@@ -245,11 +245,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: netpol-exporter
-  namespace: netpol-crafter
+  name: pharos-exporter
+  namespace: pharos-frontend
 spec:
   selector:
-    app.kubernetes.io/name: netpol-exporter
+    app.kubernetes.io/name: pharos-exporter
   ports:
     - port: 8080
       targetPort: 8080

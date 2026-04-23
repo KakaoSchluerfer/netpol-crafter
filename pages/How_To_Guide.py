@@ -11,7 +11,7 @@ if not st.session_state.get("authenticated"):
 
 st.title("📖 NetworkPolicy – How-To Guide")
 st.markdown(
-    "A practical reference for the patterns supported by **NetPol Crafter** "
+    "A practical reference for the patterns supported by **Pharos** "
     "and the Kubernetes `networking.k8s.io/v1` NetworkPolicy API."
 )
 st.divider()
@@ -266,7 +266,7 @@ Pods that call external APIs (payment gateways, analytics, etc.) need
 egress `ipBlock` rules. DNS must be allowed separately (see pattern 7).
 
 If multiple hostnames resolve to the same IP, only one rule is generated
-— NetPol Crafter deduplicates overlapping CIDRs automatically.
+— Pharos deduplicates overlapping CIDRs automatically.
 """)
     st.code("""
 apiVersion: networking.k8s.io/v1

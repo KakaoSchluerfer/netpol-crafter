@@ -23,7 +23,7 @@ class AppConfig:
     ocp_ca_cert_path: str   # path to PEM CA bundle; empty = use system CAs
 
     # Exporter
-    exporter_url: str       # http://netpol-exporter:8080
+    exporter_url: str       # http://pharos-exporter:8080
 
     # Display
     cluster_name: str
@@ -54,11 +54,11 @@ def get_config() -> AppConfig:
 
     config = AppConfig(
         ocp_api_server=os.getenv("OCP_API_SERVER", "https://api.test-cluster:6443"),
-        ocp_client_id=os.getenv("OCP_CLIENT_ID", "netpol-crafter"),
+        ocp_client_id=os.getenv("OCP_CLIENT_ID", "pharos-frontend"),
         ocp_client_secret=os.getenv("OCP_CLIENT_SECRET", ""),
         ocp_redirect_uri=os.getenv("OCP_REDIRECT_URI", "http://localhost:8501"),
         ocp_ca_cert_path=os.getenv("OCP_CA_CERT_PATH", ""),
-        exporter_url=os.getenv("EXPORTER_URL", "http://netpol-exporter:8080"),
+        exporter_url=os.getenv("EXPORTER_URL", "http://pharos-exporter:8080"),
         cluster_name=os.getenv("CLUSTER_NAME", "default"),
         app_secret_key=os.environ["APP_SECRET_KEY"],
         debug=os.getenv("DEBUG", "false").lower() == "true",

@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def render_login_page(authenticator: OIDCAuthenticator) -> None:
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
-        st.markdown("## 🔐 NetPol Crafter")
+        st.markdown("## 🔐 Pharos")
         st.markdown(
             "**OpenShift Network Policy builder** — authenticate with your "
             "OpenShift account to continue."

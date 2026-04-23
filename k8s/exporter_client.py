@@ -1,4 +1,4 @@
-"""HTTP client for the netpol-exporter REST API (used by the Streamlit app).
+"""HTTP client for the pharos-exporter REST API (used by the Streamlit app).
 
 The _SnapshotRefresher (a st.cache_resource singleton) keeps the latest snapshot
 in memory, refreshes it from the exporter every REFRESH_INTERVAL seconds in a
