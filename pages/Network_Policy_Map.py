@@ -25,7 +25,7 @@ from k8s.exporter_client import (
 from ui.netpol_viz import (
     ns_palette, build_workloads, compute_cluster_data, build_dot,
     check_route_reachability, route_diagram_dot,
-    cidr_label, merge_edge_ports, is_intra_namespace_only,
+    cidr_label, merge_edge_ports, is_intra_namespace_only, detect_policy_issues,
 )
 
 logger = logging.getLogger(__name__)
@@ -258,8 +258,8 @@ def main() -> None:
         st.warning("No pods found in the selected namespaces.")
         return
 
-    tab_graph, tab_flows, tab_routes, tab_policies, tab_dot = st.tabs(
-        ["📊 Diagram", "🔗 Allowed Flows", "🛣️ Routes", "📋 Policies", "⟨/⟩ DOT source"]
+    tab_graph, tab_flows, tab_routes, tab_policies, tab_issues, tab_dot = st.tabs(
+        ["📊 Diagram", "🔗 Allowed Flows", "🛣️ Routes", "📋 Policies", "⚠️ Issues", "⟨/⟩ DOT source"]
     )
 
     with tab_graph:
@@ -359,6 +359,42 @@ def main() -> None:
                 if spec.get("egress") is not None:
                     st.markdown("**Egress rules**")
                     st.code(yaml.dump(spec["egress"], default_flow_style=False).strip(), language="yaml")
+
+    with tab_issues:
+        flagged = []
+        for pol in active_policies:
+            issues = detect_policy_issues(pol)
+            if issues:
+                meta = pol.get("metadata", {})
+                flagged.append({
+                    "policy": pol,
+                    "name": meta.get("name", ""),
+                    "namespace": meta.get("namespace", ""),
+                    "issues": issues,
+                })
+
+        if not flagged:
+            st.success("No policy issues detected in the selected namespaces.")
+        else:
+            st.warning(
+                f"**{len(flagged)} policy issue(s) detected.** "
+                "Flows from these rules are hidden in the diagram."
+            )
+            for item in sorted(flagged, key=lambda x: (x["namespace"], x["name"])):
+                with st.expander(f"**{item['name']}** · `{item['namespace']}`"):
+                    for issue in item["issues"]:
+                        st.error(issue, icon="⚠️")
+                    spec = item["policy"].get("spec", {})
+                    if spec.get("policyTypes"):
+                        st.markdown(f"**policyTypes:** `{spec['policyTypes']}`")
+                    if spec.get("ingress") is not None:
+                        st.markdown("**ingress rules:**")
+                        st.code(yaml.dump(spec["ingress"], default_flow_style=False).strip(),
+                                language="yaml")
+                    if spec.get("egress") is not None:
+                        st.markdown("**egress rules:**")
+                        st.code(yaml.dump(spec["egress"], default_flow_style=False).strip(),
+                                language="yaml")
 
     with tab_dot:
         if _too_many:

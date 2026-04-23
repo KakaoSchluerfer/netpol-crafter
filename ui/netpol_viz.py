@@ -221,6 +221,46 @@ def merge_edge_ports(annotations: list[tuple[list[dict] | None, str]]) -> str:
     return format_ports(all_ports) if all_ports else "all ports"
 
 
+# ── Policy issue detection ────────────────────────────────────────────────────
+
+def detect_policy_issues(policy: dict) -> list[str]:
+    """Return human-readable issue descriptions for a potentially misconfigured policy.
+
+    Returns [] when the policy looks correct.
+    """
+    spec = policy.get("spec", {})
+    policy_types = set(spec.get("policyTypes") or [])
+    issues: list[str] = []
+
+    if "Ingress" in policy_types:
+        ingress_rules = spec.get("ingress") or []
+        if not ingress_rules:
+            issues.append(
+                "policyTypes declares Ingress but no ingress rules are defined — "
+                "this silently denies all ingress traffic."
+            )
+        elif not any(r.get("from") for r in ingress_rules):
+            issues.append(
+                "policyTypes declares Ingress but every ingress rule has an empty 'from' list — "
+                "this allows all ingress unrestricted and is likely unintentional."
+            )
+
+    if "Egress" in policy_types:
+        egress_rules = spec.get("egress") or []
+        if not egress_rules:
+            issues.append(
+                "policyTypes declares Egress but no egress rules are defined — "
+                "this silently denies all egress traffic."
+            )
+        elif not any(r.get("to") for r in egress_rules):
+            issues.append(
+                "policyTypes declares Egress but every egress rule has an empty 'to' list — "
+                "this allows all egress unrestricted and is likely unintentional."
+            )
+
+    return issues
+
+
 # ── Intra-namespace policy detection ─────────────────────────────────────────
 
 def is_intra_namespace_only(policy: dict) -> bool:
@@ -303,28 +343,31 @@ def collect_edges(
             raw_ports = rule.get("ports") or None
             peers = rule.get("from") or []
             if not peers:
-                for src in workloads:
-                    for tgt in targets:
-                        if src != tgt:
-                            add(src, tgt, raw_ports, pol_name)
+                # Empty from = allow all sources. Not visualized — surfaces in the
+                # Issues tab. Generating all-to-all edges would create noise and is
+                # usually a sign of a misconfigured policy.
                 continue
             for peer in peers:
-                ip_block = peer.get("ipBlock")
-                if ip_block:
-                    if show_external:
-                        cidr = ip_block.get("cidr", "0.0.0.0/0")
+                # Check KEY PRESENCE so an empty/null ipBlock never falls through
+                # to the pod-type branch and creates spurious pod-to-pod edges.
+                is_ip_peer = "ipBlock" in peer or "ip_block" in peer
+                if is_ip_peer:
+                    ip_block = peer.get("ipBlock") or peer.get("ip_block") or {}
+                    if show_external and ip_block.get("cidr"):
+                        cidr = ip_block["cidr"]
                         eid = "ext_" + cidr.replace("/", "_").replace(".", "_")
                         external_nodes[cidr] = eid
                         for tgt in targets:
                             add(eid, tgt, raw_ports, pol_name)
                 else:
-                    # podSelector-only peer → same namespace as policy (K8s semantics)
-                    ns_sel = peer.get("namespaceSelector")
+                    ns_sel = (peer.get("namespaceSelector")
+                              or peer.get("namespace_selector"))
                     sources = find_peers(
                         workloads, ns_labels, visible_ns,
                         restrict_ns=None if ns_sel is not None else pol_ns,
                         ns_selector=ns_sel,
-                        pod_selector=peer.get("podSelector"),
+                        pod_selector=(peer.get("podSelector")
+                                      or peer.get("pod_selector")),
                     )
                     for src in sources:
                         for tgt in targets:
@@ -335,28 +378,27 @@ def collect_edges(
             raw_ports = rule.get("ports") or None
             peers = rule.get("to") or []
             if not peers:
-                for dst in workloads:
-                    for src in targets:
-                        if src != dst:
-                            add(src, dst, raw_ports, pol_name)
+                # Empty to = allow all destinations. Not visualized — see Issues tab.
                 continue
             for peer in peers:
-                ip_block = peer.get("ipBlock")
-                if ip_block:
-                    if show_external:
-                        cidr = ip_block.get("cidr", "0.0.0.0/0")
+                is_ip_peer = "ipBlock" in peer or "ip_block" in peer
+                if is_ip_peer:
+                    ip_block = peer.get("ipBlock") or peer.get("ip_block") or {}
+                    if show_external and ip_block.get("cidr"):
+                        cidr = ip_block["cidr"]
                         eid = "ext_" + cidr.replace("/", "_").replace(".", "_")
                         external_nodes[cidr] = eid
                         for src in targets:
                             add(src, eid, raw_ports, pol_name)
                 else:
-                    # podSelector-only peer → same namespace as policy (K8s semantics)
-                    ns_sel = peer.get("namespaceSelector")
+                    ns_sel = (peer.get("namespaceSelector")
+                              or peer.get("namespace_selector"))
                     dests = find_peers(
                         workloads, ns_labels, visible_ns,
                         restrict_ns=None if ns_sel is not None else pol_ns,
                         ns_selector=ns_sel,
-                        pod_selector=peer.get("podSelector"),
+                        pod_selector=(peer.get("podSelector")
+                                      or peer.get("pod_selector")),
                     )
                     for dst in dests:
                         for src in targets:

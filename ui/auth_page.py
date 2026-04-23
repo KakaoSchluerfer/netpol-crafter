@@ -15,10 +15,11 @@ logger = logging.getLogger(__name__)
 def render_login_page(authenticator: OIDCAuthenticator) -> None:
     col_l, col_c, col_r = st.columns([1, 2, 1])
     with col_c:
-        st.markdown("## 🔐 Pharos")
+        st.image("sources/images/pharos.png", use_container_width=True)
         st.markdown(
-            "**OpenShift Network Policy builder** — authenticate with your "
-            "OpenShift account to continue."
+            "<h3 style='text-align:center;margin-top:0'>OpenShift Network Policy builder</h3>"
+            "<p style='text-align:center;color:grey'>Authenticate with your OpenShift account to continue.</p>",
+            unsafe_allow_html=True,
         )
         st.divider()
 

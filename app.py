@@ -15,10 +15,11 @@ import streamlit as st
 # Must be the first Streamlit call in the script.
 st.set_page_config(
     page_title="Pharos",
-    page_icon="🔒",
+    page_icon="sources/images/favicon.ico",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+st.sidebar.image("sources/images/pharos.png", use_container_width=True)
 
 logger = logging.getLogger(__name__)
 
