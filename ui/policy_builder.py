@@ -864,9 +864,9 @@ def render_policy_builder(config: AppConfig) -> None:
         )
 
     # ── Page header ───────────────────────────────────────────────────────────
-    _hc1, _hc2 = st.columns([1, 11])
+    _hc1, _hc2 = st.columns([1, 15])
     with _hc1:
-        st.image("sources/images/pharos.png", use_container_width=True)
+        st.image("sources/images/pharos.png", width=48)
     with _hc2:
         st.title("Pharos")
     st.markdown(

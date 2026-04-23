@@ -19,7 +19,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-st.sidebar.image("sources/images/pharos.png", use_container_width=True)
+st.sidebar.image("sources/images/pharos.png", width=160)
 
 logger = logging.getLogger(__name__)
 
