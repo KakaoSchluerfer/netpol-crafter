@@ -25,7 +25,7 @@ from k8s.exporter_client import (
 from ui.netpol_viz import (
     ns_palette, build_workloads, compute_cluster_data, build_dot,
     check_route_reachability, route_diagram_dot,
-    cidr_label, merge_edge_ports,
+    cidr_label, merge_edge_ports, is_intra_namespace_only,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,11 +78,14 @@ def main() -> None:
     ns_to_apps = {ns: sorted(apps) for ns, apps in ns_to_apps.items()}
 
     ns_to_policies: dict[str, list[str]] = {}
+    ns_intra_policies: dict[str, set[str]] = {}
     for p in policies:
         ns = p.get("metadata", {}).get("namespace", "")
         name = p.get("metadata", {}).get("name", "")
         if ns and name:
             ns_to_policies.setdefault(ns, []).append(name)
+            if is_intra_namespace_only(p):
+                ns_intra_policies.setdefault(ns, set()).add(name)
     ns_to_policies = {ns: sorted(names) for ns, names in ns_to_policies.items()}
 
     # External endpoints (ipBlock CIDRs) referenced by each namespace's policies
@@ -128,8 +131,8 @@ def main() -> None:
         )
 
         pol_names = ns_to_policies.get(ns, [])
-        # Default policies are hidden by default; all others pre-selected
-        default_pol_selection = [n for n in pol_names if n not in _DEFAULT_POLICY_NAMES]
+        _hidden = _DEFAULT_POLICY_NAMES | ns_intra_policies.get(ns, set())
+        default_pol_selection = [n for n in pol_names if n not in _hidden]
         ns_selected_policies[ns] = set(st.sidebar.multiselect(
             "Network Policies",
             options=pol_names,
@@ -222,10 +225,16 @@ def main() -> None:
         ns_labels,
     )
 
-    # ── Render DOT ────────────────────────────────────────────────────────────
-    dot = build_dot(
-        workloads, ns_labels, edges, external_nodes, active_ns,
-        route_results=route_results,
+    # ── Render DOT (skip when too many flows to keep the diagram readable) ────
+    _FLOW_LIMIT = 100
+    _too_many = len(edges) > _FLOW_LIMIT
+    dot = (
+        ""
+        if _too_many
+        else build_dot(
+            workloads, ns_labels, edges, external_nodes, active_ns,
+            route_results=route_results,
+        )
     )
     active_policies = [
         p for p in visible_policies
@@ -254,9 +263,15 @@ def main() -> None:
     )
 
     with tab_graph:
-        if not edges and not external_nodes:
+        if _too_many:
+            st.warning(
+                f"**{len(edges)} flows detected** — too many to render clearly. "
+                f"Please narrow the workload or policy selection to fewer than {_FLOW_LIMIT} flows."
+            )
+        elif not edges and not external_nodes:
             st.info("No allowed flows found. Either no NetworkPolicies are configured, or all traffic is denied.")
-        st.graphviz_chart(dot, use_container_width=True)
+        else:
+            st.graphviz_chart(dot, use_container_width=True)
 
     with tab_flows:
         if not edges:
@@ -346,8 +361,11 @@ def main() -> None:
                     st.code(yaml.dump(spec["egress"], default_flow_style=False).strip(), language="yaml")
 
     with tab_dot:
-        st.code(dot, language="dot")
-        st.download_button("⬇ Download .dot", dot, file_name="netpol-map.dot", mime="text/plain")
+        if _too_many:
+            st.info("DOT source is not generated when flow count exceeds the render limit.")
+        else:
+            st.code(dot, language="dot")
+            st.download_button("⬇ Download .dot", dot, file_name="netpol-map.dot", mime="text/plain")
 
 
 main()

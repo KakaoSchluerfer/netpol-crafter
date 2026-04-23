@@ -134,10 +134,12 @@ def _build_peer(rule: dict) -> dict:
 
 
 def _parse_port_spec(spec: str, protocol: str) -> tuple[list[dict], str | None]:
-    """Parse a comma-separated port spec into individual port dicts.
+    """Parse a comma-separated port spec into port dicts.
 
-    '443,5090-5095,9111' → [{"protocol":"TCP","port":443}, {"protocol":"TCP","port":5090}, ...]
-    Ranges are expanded to individual entries (no endPort).
+    Single ports  '443,9111'    → {protocol,port}
+    Ranges        '5090-5095'   → {protocol,port,endPort}  (K8s native range)
+
+    '443,5090-5095,9111' → [{port:443}, {port:5090,endPort:5095}, {port:9111}]
     Returns (entries, error_message).
     """
     entries: list[dict] = []
@@ -150,13 +152,7 @@ def _parse_port_spec(spec: str, protocol: str) -> tuple[list[dict], str | None]:
                 return [], f"Invalid range '{token}': both sides must be integers."
             if start > end:
                 start, end = end, start
-            if end - start >= 1000:
-                return [], (
-                    f"Range '{token}' spans {end - start + 1} ports. "
-                    "Use a range of at most 1000 ports."
-                )
-            for port in range(start, end + 1):
-                entries.append({"protocol": protocol, "port": port})
+            entries.append({"protocol": protocol, "port": start, "endPort": end})
         else:
             try:
                 entries.append({"protocol": protocol, "port": int(token)})
@@ -171,13 +167,17 @@ def _build_port_entries(ports: list[dict]) -> list[dict]:
     for p in ports:
         proto = p.get("protocol", "TCP")
         port = p.get("port")
+        end_port = p.get("endPort")
         if port is None:
             continue
-        key = (proto, port)
+        key = (proto, port, end_port)
         if key in seen:
             continue
         seen.add(key)
-        result.append({"protocol": proto, "port": int(port)})
+        entry: dict = {"protocol": proto, "port": int(port)}
+        if end_port is not None:
+            entry["endPort"] = int(end_port)
+        result.append(entry)
     return result
 
 

@@ -221,6 +221,36 @@ def merge_edge_ports(annotations: list[tuple[list[dict] | None, str]]) -> str:
     return format_ports(all_ports) if all_ports else "all ports"
 
 
+# ── Intra-namespace policy detection ─────────────────────────────────────────
+
+def is_intra_namespace_only(policy: dict) -> bool:
+    """Return True when every peer in every rule is podSelector-only (same namespace).
+
+    Policies with empty from/to lists (= allow all sources/destinations),
+    namespaceSelector, or ipBlock peers are NOT considered intra-namespace.
+    """
+    spec = policy.get("spec", {})
+    ingress_rules = spec.get("ingress") or []
+    egress_rules  = spec.get("egress")  or []
+    if not ingress_rules and not egress_rules:
+        return False
+    for rule in ingress_rules:
+        peers = rule.get("from") or []
+        if not peers:
+            return False  # empty from = allow all sources
+        for peer in peers:
+            if peer.get("namespaceSelector") is not None or peer.get("ipBlock") is not None:
+                return False
+    for rule in egress_rules:
+        peers = rule.get("to") or []
+        if not peers:
+            return False  # empty to = allow all destinations
+        for peer in peers:
+            if peer.get("namespaceSelector") is not None or peer.get("ipBlock") is not None:
+                return False
+    return True
+
+
 # ── Edge collection ───────────────────────────────────────────────────────────
 
 def collect_edges(
@@ -704,7 +734,7 @@ def build_dot(
         if src in workloads and (workloads[src]["namespace"], dst) in collapsible_src:
             continue  # will be drawn as a collapsed edge below
         policy_names = sorted({pn for _, pn in annotations})
-        label = merge_edge_ports(annotations) + "\\n(" + ", ".join(policy_names) + ")"
+        label = merge_edge_ports(annotations) + "\\n" + "\\n".join(policy_names)
         if src.startswith("ext_"):
             color = "#9E9E9E"
         else:
@@ -718,7 +748,7 @@ def build_dot(
     for (src_ns, dst), annotations in sorted(collapsed_ann.items()):
         rep_src = min(ns_workloads[src_ns])  # stable representative node inside the cluster
         policy_names = sorted({pn for _, pn in annotations})
-        label = merge_edge_ports(annotations) + "\\n(" + ", ".join(policy_names) + ")"
+        label = merge_edge_ports(annotations) + "\\n" + "\\n".join(policy_names)
         ns_border, _, _ = ns_palette(src_ns)
         safe_src_ns = src_ns.replace("-", "_")
         lines.append(
