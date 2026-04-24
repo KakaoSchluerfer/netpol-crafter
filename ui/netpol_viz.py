@@ -995,12 +995,13 @@ def policy_preview_dot(
     all_pods: list[dict],
     ns_labels: dict[str, dict[str, str]],
     show_external: bool = True,
-) -> tuple[str, int]:
-    """
-    Build a DOT diagram for a single crafted policy.
+    flow_limit: int = 50,
+) -> tuple[str, int, int]:
+    """Build a DOT diagram for a single crafted policy.
 
-    Returns (dot_string, num_flows).
-    Uses all_pods + ns_labels from the cluster to resolve selectors.
+    Returns (dot_string, n_rendered, n_total).
+    When total edges exceed flow_limit the diagram is capped at flow_limit
+    edges so the browser always receives a renderable graph.
     """
     workloads = build_workloads(all_pods)
     visible_ns = set(ns_labels.keys()) | {w["namespace"] for w in workloads.values()}
@@ -1012,7 +1013,13 @@ def policy_preview_dot(
         [policy_dict], workloads, ns_labels, visible_ns, show_external
     )
 
-    # Only include workloads that are actual edge endpoints (matched by a selector),
+    n_total = len(edges)
+
+    # Cap edges to avoid passing an oversized graph to the browser renderer.
+    if n_total > flow_limit:
+        edges = dict(list(edges.items())[:flow_limit])
+
+    # Only include workloads that are actual edge endpoints,
     # plus the policy's own pod targets so isolated pods remain visible.
     involved: set[str] = {
         key for pair in edges for key in pair if key in workloads
@@ -1026,9 +1033,8 @@ def policy_preview_dot(
 
     filtered_workloads = {k: v for k, v in workloads.items() if k in involved}
     selected_ns = sorted({w["namespace"] for w in filtered_workloads.values()})
-
     dot = build_dot(filtered_workloads, ns_labels, edges, external_nodes, selected_ns)
-    return dot, len(edges)
+    return dot, len(edges), n_total
 
 
 def compute_cluster_data(

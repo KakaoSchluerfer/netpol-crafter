@@ -1077,21 +1077,22 @@ def render_policy_builder(config: AppConfig) -> None:
     st.code(yaml_str, language="yaml")
 
     st.markdown("### Connection diagram")
-    _BUILDER_FLOW_LIMIT = 100
-    _viz_dot, _viz_flows = policy_preview_dot(policy_dict, all_pods_global, all_ns_labels_map)
-    if _viz_flows == 0:
+    _viz_dot, _viz_rendered, _viz_total = policy_preview_dot(
+        policy_dict, all_pods_global, all_ns_labels_map,
+    )
+    if _viz_total == 0:
         st.info(
             "No matching workloads found for the selectors in this policy. "
             "The diagram will populate once the namespace and pod selectors "
             "match pods in the cluster.",
             icon="ℹ️",
         )
-    elif _viz_flows > _BUILDER_FLOW_LIMIT:
-        st.warning(
-            f"**{_viz_flows} flows detected** — too many to render clearly. "
-            "Narrow the pod or namespace selector to reduce the scope."
-        )
     else:
+        if _viz_total > _viz_rendered:
+            st.caption(
+                f"Showing {_viz_rendered} of {_viz_total} flows — "
+                "add more specific selectors to see the full picture."
+            )
         st.graphviz_chart(_viz_dot, width="stretch")
 
     st.markdown("### Policy explainer")
