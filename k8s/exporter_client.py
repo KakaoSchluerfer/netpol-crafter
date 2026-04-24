@@ -177,7 +177,6 @@ def _build_fixture_snapshot() -> ClusterSnapshot:
         PodModel(
             name=p["name"], namespace=p["namespace"],
             labels=p.get("labels", {}), workload_labels=p.get("workload_labels", {}),
-            phase=p.get("phase", "Running"),
         )
         for p in _fix.get_all_pods()
     ]

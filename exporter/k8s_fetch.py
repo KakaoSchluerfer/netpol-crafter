@@ -58,10 +58,28 @@ def _build_api_client() -> k8s_client.ApiClient:
     return k8s_client.ApiClient(configuration=cfg)
 
 
+_PAGE_SIZE = 500
+
+
+def _paginate(list_func, **kwargs):
+    """Exhaust all pages from a K8s list call, following continuation tokens."""
+    items = []
+    token = None
+    while True:
+        kw = {"limit": _PAGE_SIZE, "_request_timeout": 30, **kwargs}
+        if token:
+            kw["_continue"] = token
+        resp = list_func(**kw)
+        items.extend(resp.items)
+        token = getattr(resp.metadata, "_continue", None) if resp.metadata else None
+        if not token:
+            break
+    return items
+
+
 def _fetch_namespaces(core: k8s_client.CoreV1Api) -> list[NamespaceModel]:
-    ns_list = core.list_namespace(_request_timeout=10)
     result = []
-    for ns in ns_list.items:
+    for ns in _paginate(core.list_namespace):
         labels = _safe_labels(ns.metadata.labels)
         labels.setdefault("kubernetes.io/metadata.name", ns.metadata.name)
         result.append(NamespaceModel(name=ns.metadata.name, labels=labels))
@@ -69,24 +87,24 @@ def _fetch_namespaces(core: k8s_client.CoreV1Api) -> list[NamespaceModel]:
 
 
 def _fetch_pods(core: k8s_client.CoreV1Api) -> list[PodModel]:
-    pod_list = core.list_pod_for_all_namespaces(_request_timeout=10)
+    # Only fetch Running pods — reduces payload and excludes terminated replicas.
+    # We only need name, namespace and labels for selector matching.
     result = []
-    for pod in pod_list.items:
+    for pod in _paginate(core.list_pod_for_all_namespaces,
+                         field_selector="status.phase=Running"):
         labels = _safe_labels(pod.metadata.labels)
         result.append(PodModel(
             name=pod.metadata.name,
             namespace=pod.metadata.namespace,
             labels=labels,
             workload_labels=extract_workload_labels(labels),
-            phase=(pod.status.phase or "Unknown") if pod.status else "Unknown",
         ))
     return result
 
 
 def _fetch_services(core: k8s_client.CoreV1Api) -> list[ServiceModel]:
-    svc_list = core.list_service_for_all_namespaces(_request_timeout=10)
     result = []
-    for svc in svc_list.items:
+    for svc in _paginate(core.list_service_for_all_namespaces):
         ports = []
         for p in svc.spec.ports or []:
             ports.append(ServicePortModel(
@@ -134,11 +152,10 @@ def _fetch_routes(custom: k8s_client.CustomObjectsApi) -> list[RouteModel]:
 
 
 def _fetch_network_policies(networking: k8s_client.NetworkingV1Api) -> list[NetworkPolicyModel]:
-    raw = networking.list_network_policy_for_all_namespaces(_request_timeout=10)
     from kubernetes.client import ApiClient as _ApiClient
     temp = _ApiClient()
     result = []
-    for pol in raw.items:
+    for pol in _paginate(networking.list_network_policy_for_all_namespaces):
         d = temp.sanitize_for_serialization(pol)
         meta = d.get("metadata", {})
         result.append(NetworkPolicyModel(
@@ -208,7 +225,6 @@ def _build_fixture_snapshot() -> ClusterSnapshot:
             name=p["name"], namespace=p["namespace"],
             labels=p.get("labels", {}),
             workload_labels=p.get("workload_labels", {}),
-            phase=p.get("phase", "Running"),
         ))
     services = []
     for ns in _fix.get_namespaces():

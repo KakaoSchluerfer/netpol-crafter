@@ -20,7 +20,6 @@ class PodModel(BaseModel):
     namespace: str
     labels: dict[str, str] = {}
     workload_labels: dict[str, str] = {}
-    phase: str = "Unknown"
 
 
 class ServiceModel(BaseModel):

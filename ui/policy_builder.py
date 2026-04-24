@@ -1077,6 +1077,7 @@ def render_policy_builder(config: AppConfig) -> None:
     st.code(yaml_str, language="yaml")
 
     st.markdown("### Connection diagram")
+    _BUILDER_FLOW_LIMIT = 100
     _viz_dot, _viz_flows = policy_preview_dot(policy_dict, all_pods_global, all_ns_labels_map)
     if _viz_flows == 0:
         st.info(
@@ -1085,7 +1086,13 @@ def render_policy_builder(config: AppConfig) -> None:
             "match pods in the cluster.",
             icon="ℹ️",
         )
-    st.graphviz_chart(_viz_dot, width="stretch")
+    elif _viz_flows > _BUILDER_FLOW_LIMIT:
+        st.warning(
+            f"**{_viz_flows} flows detected** — too many to render clearly. "
+            "Narrow the pod or namespace selector to reduce the scope."
+        )
+    else:
+        st.graphviz_chart(_viz_dot, width="stretch")
 
     st.markdown("### Policy explainer")
     st.markdown(explain_policy_preview(policy_dict))
